@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Clone the dev branch of WrenAI repository
-RUN git clone -b dev git clone https://cdn.gh-proxy.org/https://github.com/CodeFindc/WrenAI.git /app
+RUN git clone -b dev https://cdn.gh-proxy.org/https://github.com/CodeFindc/WrenAI.git /app
 
 # Install dependencies and build the frontend chat UI
 WORKDIR /app/sdk/wren-langchain/examples/wren-chat-ui
