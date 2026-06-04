@@ -14,13 +14,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN git clone -b dev https://github.com/CodeFindc/WrenAI.git /app
 
 # Install core/wren package to get the "wren" CLI command tool
-RUN pip install -e /app/core/wren[all]
+RUN pip install -e /app/core/wren[all] 
 
 # Change working directory to the sdk/wren-langchain folder
 WORKDIR /app/sdk/wren-langchain
 
 # Install the wren-langchain package in editable mode with all optional dependencies
-RUN pip install -e .[all]
+RUN sed -i 's/wren-engine/wrenai/g' pyproject.toml && pip install -e .[all]
 
 # Change working directory to examples
 WORKDIR /app/sdk/wren-langchain/examples
