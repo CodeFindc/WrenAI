@@ -8,3 +8,4 @@ Dockerfile text eol=lf
 docker-compose.yaml text eol=lf
 requirements.txt text eol=lf
 .gitattributes text eol=lf
+.env.example text eol=lf
