@@ -1,5 +1,5 @@
 # Use official Python 3.11 slim image
-FROM python:3.11-slim
+FROM python:3.14
 
 # Set working directory
 WORKDIR /app
@@ -29,8 +29,7 @@ WORKDIR /app/sdk/wren-langchain/examples
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Ensure entrypoint.sh is executable and has correct line endings
-RUN chmod +x entrypoint.sh && \
-    sed -i 's/\r$//' entrypoint.sh
+RUN chmod +x entrypoint.sh 
 
 # Expose the API server port
 EXPOSE 8201

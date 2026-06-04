@@ -8,6 +8,12 @@ services:
     ports:
       - "8201:8201"
     environment:
+      # OpenAI API config Embedded Model  (or general OpenAI-compatible endpoints)
+      - WREN_EMBEDDING_PROVIDER=openai
+      - WREN_EMBEDDING_MODEL=${WREN_EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B}
+      - EM_OPENAI_API_KEY=${EM_OPENAI_API_KEY:-sk-HDoRjhs3Z4WIeU1cYfho9jaNQWvye5lPWyY1YpEmmJpdrBjx}
+      - EM_OPENAI_BASE_URL=${EM_OPENAI_BASE_URL:-http://192.168.110.208:8100/v1}
+
       # OpenAI API config (or general OpenAI-compatible endpoints)
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_API_BASE=${OPENAI_API_BASE:-}
@@ -34,6 +40,7 @@ services:
       - DB_PASSWORD=${DB_PASSWORD:-}
       - SSL_MODE=${SSL_MODE:-}
       - EXTRA_PROFILE_KEYS=${EXTRA_PROFILE_KEYS:-}
+      - STREAM=1
     volumes:
       # Mount host directory for project configs, models, target MDL and database profiles.
       - ./wren_project:/project
