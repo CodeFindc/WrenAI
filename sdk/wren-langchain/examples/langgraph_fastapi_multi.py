@@ -101,7 +101,6 @@ def get_current_time() -> str:
     Call this tool when you need to write reports, resolve date ranges,
     or know the current date and time for statistical purposes.
     """
-    now = datetime.datetime.now()
     return now.strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -118,27 +117,47 @@ def build_app(toolkit: WrenToolkit, checkpointer, model_name: str = "gpt-4o"):
 
     print(f"--- Configured LLM: {model_to_use} | API Base: {api_base} ---")
 
-    model_with_tools = ChatOpenAI(
-        model=model_to_use, 
-        base_url=api_base,
-        api_key=api_key,
-        temperature=0,
-        model_kwargs={
-            "extra_body": {
-               "option": {
-                    "num_ctx": 1048576  # 1M tokens
-               }
-            }
-        }
-    ).bind_tools(tools)
+    # Keep a cached instance to preserve connection pooling/performance under normal conditions
+    model_with_tools = None
+
+    def get_model():
+        nonlocal model_with_tools
+        if model_with_tools is None:
+            model_with_tools = ChatOpenAI(
+                model=model_to_use, 
+                base_url=api_base,
+                api_key=api_key,
+                temperature=0,
+                model_kwargs={
+                    "extra_body": {
+                        "option": {
+                            "num_ctx": 1048576  # 1M tokens
+                        }
+                    }
+                }
+            ).bind_tools(tools)
+        return model_with_tools
 
     def agent_node(state: AgentState) -> dict:
+        nonlocal model_with_tools
         messages = state["messages"]
         if not messages or not isinstance(messages[0], SystemMessage):
             messages = [SystemMessage(content=system_prompt), *messages]
         
         print(f"\n[LLM Request] Model to call: {model_to_use}")
-        response = model_with_tools.invoke(messages)
+        
+        try:
+            model = get_model()
+            response = model.invoke(messages)
+        except Exception as e:
+            # Catch LLM connection/invocation errors, reset client session and retry
+            print(f"LLM invocation failed: {e}. Resetting client connection pool and retrying...")
+            model_with_tools = None  # Discard the broken client session
+            
+            # Retry with a fresh client session
+            model = get_model()
+            response = model.invoke(messages)
+            
         print(f"[LLM Response Metadata] Received metadata: {response.response_metadata}\n")
         
         return {"messages": [response]}
