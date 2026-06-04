@@ -10,5 +10,9 @@ export default defineConfig({
     tailwindcss(),
     viteSingleFile()
   ],
-  base: './'
+  base: './',
+  build: {
+    target: 'chrome89',
+    cssTarget: 'chrome89'
+  }
 })
