@@ -192,6 +192,32 @@ async def lifespan(app: FastAPI):
     project_path = os.environ.get("PROJECT_PATH")
     db_uri = os.environ.get("CHAT_HISTORY_DB_URI")
 
+    # On Windows, 'localhost' often resolves to IPv6 '::1', which causes connection failure (WinError 10061)
+    # if MySQL is only listening on IPv4 (127.0.0.1). We can replace 'localhost' with '127.0.0.1' on Windows.
+    if db_uri and sys.platform.startswith("win") and "localhost" in db_uri:
+        try:
+            from urllib.parse import urlparse, urlunparse
+            parsed = urlparse(db_uri)
+            if parsed.hostname == "localhost":
+                netloc = parsed.netloc
+                if "@" in netloc:
+                    user_pass, host_port = netloc.rsplit("@", 1)
+                    if host_port.startswith("localhost:"):
+                        host_port = "127.0.0.1" + host_port[len("localhost"):]
+                    elif host_port == "localhost":
+                        host_port = "127.0.0.1"
+                    new_netloc = f"{user_pass}@{host_port}"
+                else:
+                    if netloc.startswith("localhost:"):
+                        new_netloc = "127.0.0.1" + netloc[len("localhost"):]
+                    elif netloc == "localhost":
+                        new_netloc = "127.0.0.1"
+                parsed = parsed._replace(netloc=new_netloc)
+                db_uri = urlunparse(parsed)
+                print(f"Auto-resolved 'localhost' to '127.0.0.1' in database URI for Windows compatibility.")
+        except Exception as e:
+            print(f"Warning: Failed to auto-resolve localhost in CHAT_HISTORY_DB_URI: {e}")
+
     if not os.environ.get("OPENAI_API_KEY"):
         print("WARNING: OPENAI_API_KEY is not set. Custom endpoint configuration or key will be required.")
 
