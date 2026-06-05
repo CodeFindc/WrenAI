@@ -16,25 +16,29 @@ cd /d "%SCRIPT_DIR%"
 :: examples dir  = sdk/wren-langchain/examples
 :: langchain dir = sdk/wren-langchain
 :: core dir      = core/wren
-for %%I in ("%SCRIPT_DIR%..\..")   do set "LANGCHAIN_DIR=%%~fI"
-for %%I in ("%SCRIPT_DIR%..\..\..\core\wren") do set "CORE_DIR=%%~fI"
-echo      Wren Core  : !CORE_DIR!
-echo      LangChain  : !LANGCHAIN_DIR!
+pushd "%SCRIPT_DIR%..\.." >nul
+set "LANGCHAIN_DIR=%cd%"
+popd >nul
+pushd "%SCRIPT_DIR%..\..\..\core\wren" >nul
+set "CORE_DIR=%cd%"
+popd >nul
+echo      Wren Core  : %CORE_DIR%
+echo      LangChain  : %LANGCHAIN_DIR%
 echo.
 
 :: ── 1. Install / check dependencies (like Dockerfile) ───────────────────────
 echo [1/10] Installing / checking dependencies ...
 
 echo   1a. Installing core/wren package ...
-pip install -e "!CORE_DIR!" --quiet 2>&1 | findstr /V "^$" | findstr /V "already satisfied" || echo      core/wren already installed.
+pip install -e "%CORE_DIR%" --quiet 2>&1 | findstr /V "^$" | findstr /V "already satisfied" || echo      core/wren already installed.
 
 echo   1b. Installing wren-langchain package (with wren-engine^>wrenai substitution) ...
 :: Backup pyproject.toml, replace wren-engine with wrenai (like Dockerfile's sed), then restore
-copy "!LANGCHAIN_DIR!\pyproject.toml" "!LANGCHAIN_DIR!\pyproject.toml.bak" >nul
-powershell -Command "&{ (Get-Content '!LANGCHAIN_DIR!\pyproject.toml') -replace 'wren-engine', 'wrenai' | Set-Content '!LANGCHAIN_DIR!\pyproject.toml' -Encoding utf8 }" >nul
-pip install -e "!LANGCHAIN_DIR!" --quiet 2>&1 | findstr /V "^$" | findstr /V "already satisfied" || echo      wren-langchain already installed.
-copy "!LANGCHAIN_DIR!\pyproject.toml.bak" "!LANGCHAIN_DIR!\pyproject.toml" >nul
-del "!LANGCHAIN_DIR!\pyproject.toml.bak" >nul 2>&1
+copy "%LANGCHAIN_DIR%\pyproject.toml" "%LANGCHAIN_DIR%\pyproject.toml.bak" >nul
+powershell -Command "&{ (Get-Content '%LANGCHAIN_DIR%\pyproject.toml') -replace 'wren-engine', 'wrenai' | Set-Content '%LANGCHAIN_DIR%\pyproject.toml' -Encoding utf8 }" >nul
+pip install -e "%LANGCHAIN_DIR%" --quiet 2>&1 | findstr /V "^$" | findstr /V "already satisfied" || echo      wren-langchain already installed.
+copy "%LANGCHAIN_DIR%\pyproject.toml.bak" "%LANGCHAIN_DIR%\pyproject.toml" >nul
+del "%LANGCHAIN_DIR%\pyproject.toml.bak" >nul 2>&1
 
 echo   1c. Installing requirements.txt ...
 pip install -r "%SCRIPT_DIR%requirements.txt" --quiet 2>&1 | findstr /V "^$" | findstr /V "already satisfied" || echo      requirements already satisfied.
