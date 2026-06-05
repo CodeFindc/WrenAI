@@ -256,7 +256,7 @@ if exist "%MDL_JSON%" (
     if !ERRORLEVEL! equ 0 (
         echo      Memory indexing complete.
     ) else (
-        echo      WARNING: Memory indexing failed (memory extra may not be installed).
+        echo      WARNING: Memory indexing failed. Memory extra may not be installed.
         echo      To install: pip install "wrenai[memory]"
     )
 ) else (
