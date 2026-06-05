@@ -62,7 +62,7 @@ echo      core/wren installed successfully.
 
 echo   1b. Installing wren-langchain package (with wren-engine^>wrenai substitution) ...
 copy "%LANGCHAIN_DIR%\pyproject.toml" "%LANGCHAIN_DIR%\pyproject.toml.bak" >nul
-powershell -Command "&{ (Get-Content '%LANGCHAIN_DIR%\pyproject.toml') -replace 'wren-engine', 'wrenai' | Set-Content '%LANGCHAIN_DIR%\pyproject.toml' -Encoding utf8 }" >nul
+python -c "import sys; p=sys.argv[1]; c=open(p, 'r', encoding='utf-8').read().replace('wren-engine', 'wrenai'); open(p, 'w', encoding='utf-8').write(c)" "%LANGCHAIN_DIR%\pyproject.toml" >nul
 pip install -e "%LANGCHAIN_DIR%" --quiet > "%SCRIPT_DIR%pip_langchain.log" 2>&1
 set "PIP_ERR=!ERRORLEVEL!"
 copy /y "%LANGCHAIN_DIR%\pyproject.toml.bak" "%LANGCHAIN_DIR%\pyproject.toml" >nul
