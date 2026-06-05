@@ -101,7 +101,7 @@ def get_current_time() -> str:
     Call this tool when you need to write reports, resolve date ranges,
     or know the current date and time for statistical purposes.
     """
-    return now.strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def build_app(toolkit: WrenToolkit, checkpointer, model_name: str = "gpt-4o"):
