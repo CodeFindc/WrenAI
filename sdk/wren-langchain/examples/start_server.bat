@@ -79,6 +79,66 @@ if !PIP_ERR! neq 0 (
 del "%SCRIPT_DIR%pip_langchain.log" >nul 2>&1
 echo      wren-langchain installed successfully.
 
+echo   1c. Checking / compiling wren-chat-ui frontend ...
+set "CHAT_UI_DIR=%SCRIPT_DIR%wren-chat-ui"
+set "DIST_HTML=!CHAT_UI_DIR!\dist\index.html"
+
+if exist "!DIST_HTML!" (
+    echo      wren-chat-ui is already compiled. ^(To force rebuild, delete wren-chat-ui\dist^)
+) else (
+    echo      wren-chat-ui build not found. Compiling React frontend ...
+    if exist "!CHAT_UI_DIR!" (
+        pushd "!CHAT_UI_DIR!" >nul
+        
+        where npm >nul 2>&1
+        set "NPM_CHECK=!ERRORLEVEL!"
+        if !NPM_CHECK! neq 0 (
+            echo.
+            echo WARNING: npm command not found on PATH.
+            echo Please make sure Node.js and npm are installed to compile the frontend,
+            echo or manually build the frontend inside wren-chat-ui.
+            echo Skipping frontend compilation.
+            popd >nul
+            goto :frontend_done
+        )
+        
+        echo      Running 'npm install' ...
+        call npm install --quiet > "%SCRIPT_DIR%npm_install.log" 2>&1
+        set "NPM_ERR=!ERRORLEVEL!"
+        if !NPM_ERR! neq 0 (
+            type "%SCRIPT_DIR%npm_install.log"
+            del "%SCRIPT_DIR%npm_install.log" >nul 2>&1
+            echo.
+            echo ERROR: 'npm install' failed.
+            popd >nul
+            pause
+            exit /b !NPM_ERR!
+        )
+        del "%SCRIPT_DIR%npm_install.log" >nul 2>&1
+        
+        echo      Running 'npm run build' ...
+        call npm run build > "%SCRIPT_DIR%npm_build.log" 2>&1
+        set "NPM_ERR=!ERRORLEVEL!"
+        if !NPM_ERR! neq 0 (
+            type "%SCRIPT_DIR%npm_build.log"
+            del "%SCRIPT_DIR%npm_build.log" >nul 2>&1
+            echo.
+            echo ERROR: 'npm run build' failed.
+            popd >nul
+            pause
+            exit /b !NPM_ERR!
+        )
+        del "%SCRIPT_DIR%npm_build.log" >nul 2>&1
+        popd >nul
+        echo      wren-chat-ui compiled successfully.
+    ) else (
+        echo      WARNING: wren-chat-ui directory not found! Skipping frontend compilation.
+    )
+)
+
+:frontend_done
+echo.
+
 REM echo   1c. Installing requirements.txt ...
 REM pip install -r "%SCRIPT_DIR%requirements.txt" --quiet > "%SCRIPT_DIR%pip_reqs.log" 2>&1
 REM set "PIP_ERR=!ERRORLEVEL!"
