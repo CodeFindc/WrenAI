@@ -26,22 +26,71 @@ echo      Wren Core  : %CORE_DIR%
 echo      LangChain  : %LANGCHAIN_DIR%
 echo.
 
+:: Add Python Scripts directory to PATH for the current session to ensure 'wren' CLI works
+for /f "delims=" %%i in ('python -c "import os, sys; print(os.path.join(os.path.dirname(sys.executable), 'Scripts'))" 2^>nul') do (
+    set "PYTHON_SCRIPTS=%%i"
+)
+if defined PYTHON_SCRIPTS (
+    if exist "!PYTHON_SCRIPTS!" (
+        set "PATH=!PATH!;!PYTHON_SCRIPTS!"
+    )
+)
+
+:: Heal previous interrupted run if backup exists
+if exist "%LANGCHAIN_DIR%\pyproject.toml.bak" (
+    echo      Restoring pyproject.toml from previous interrupted run ...
+    copy /y "%LANGCHAIN_DIR%\pyproject.toml.bak" "%LANGCHAIN_DIR%\pyproject.toml" >nul
+    del "%LANGCHAIN_DIR%\pyproject.toml.bak" >nul 2>&1
+)
+
 :: ── 1. Install / check dependencies (like Dockerfile) ───────────────────────
 echo [1/10] Installing / checking dependencies ...
 
 echo   1a. Installing core/wren package ...
-pip install -e "%CORE_DIR%" --quiet 2>&1 | findstr /V "^$" | findstr /V "already satisfied" || echo      core/wren already installed.
+pip install -e "%CORE_DIR%" --quiet > "%SCRIPT_DIR%pip_core.log" 2>&1
+set "PIP_ERR=!ERRORLEVEL!"
+if !PIP_ERR! neq 0 (
+    type "%SCRIPT_DIR%pip_core.log"
+    del "%SCRIPT_DIR%pip_core.log" >nul 2>&1
+    echo.
+    echo ERROR: Failed to install core/wren. Exiting.
+    pause
+    exit /b !PIP_ERR!
+)
+del "%SCRIPT_DIR%pip_core.log" >nul 2>&1
+echo      core/wren installed successfully.
 
 echo   1b. Installing wren-langchain package (with wren-engine^>wrenai substitution) ...
-:: Backup pyproject.toml, replace wren-engine with wrenai (like Dockerfile's sed), then restore
 copy "%LANGCHAIN_DIR%\pyproject.toml" "%LANGCHAIN_DIR%\pyproject.toml.bak" >nul
 powershell -Command "&{ (Get-Content '%LANGCHAIN_DIR%\pyproject.toml') -replace 'wren-engine', 'wrenai' | Set-Content '%LANGCHAIN_DIR%\pyproject.toml' -Encoding utf8 }" >nul
-pip install -e "%LANGCHAIN_DIR%" --quiet 2>&1 | findstr /V "^$" | findstr /V "already satisfied" || echo      wren-langchain already installed.
-copy "%LANGCHAIN_DIR%\pyproject.toml.bak" "%LANGCHAIN_DIR%\pyproject.toml" >nul
+pip install -e "%LANGCHAIN_DIR%" --quiet > "%SCRIPT_DIR%pip_langchain.log" 2>&1
+set "PIP_ERR=!ERRORLEVEL!"
+copy /y "%LANGCHAIN_DIR%\pyproject.toml.bak" "%LANGCHAIN_DIR%\pyproject.toml" >nul
 del "%LANGCHAIN_DIR%\pyproject.toml.bak" >nul 2>&1
+if !PIP_ERR! neq 0 (
+    type "%SCRIPT_DIR%pip_langchain.log"
+    del "%SCRIPT_DIR%pip_langchain.log" >nul 2>&1
+    echo.
+    echo ERROR: Failed to install wren-langchain. Exiting.
+    pause
+    exit /b !PIP_ERR!
+)
+del "%SCRIPT_DIR%pip_langchain.log" >nul 2>&1
+echo      wren-langchain installed successfully.
 
 echo   1c. Installing requirements.txt ...
-pip install -r "%SCRIPT_DIR%requirements.txt" --quiet 2>&1 | findstr /V "^$" | findstr /V "already satisfied" || echo      requirements already satisfied.
+pip install -r "%SCRIPT_DIR%requirements.txt" --quiet > "%SCRIPT_DIR%pip_reqs.log" 2>&1
+set "PIP_ERR=!ERRORLEVEL!"
+if !PIP_ERR! neq 0 (
+    type "%SCRIPT_DIR%pip_reqs.log"
+    del "%SCRIPT_DIR%pip_reqs.log" >nul 2>&1
+    echo.
+    echo ERROR: Failed to install requirements. Exiting.
+    pause
+    exit /b !PIP_ERR!
+)
+del "%SCRIPT_DIR%pip_reqs.log" >nul 2>&1
+echo      requirements installed successfully.
 
 echo.
 
@@ -51,9 +100,16 @@ if exist ".env" (
     for /f "usebackq delims=" %%a in (".env") do (
         set "line=%%a"
         if not "!line:~0,1!"=="#" if not "!line!"=="" (
-            for /f "tokens=1,* delims==" %%b in ("!line!") do (
+            for /f "tokens=1 delims=#" %%d in ("!line!") do set "line_no_comment=%%d"
+            for /f "tokens=1,* delims==" %%b in ("!line_no_comment!") do (
                 set "key=%%b"
                 set "val=%%c"
+                for /l %%p in (1,1,8) do (
+                    if "!val:~-1!"==" " set "val=!val:~0,-1!"
+                )
+                for /l %%p in (1,1,8) do (
+                    if "!val:~0,1!"==" " set "val=!val:~1!"
+                )
                 if "!val:~0,1!"==""^"" if "!val:~-1!"==""^"" set "val=!val:~1,-1!"
                 set "!key!=!val!"
             )
@@ -201,7 +257,7 @@ echo.
 :: ── 9. Load .env variables (second pass to pick up pip-installed extras) ─────
 echo [9/10] Reloading .env for server runtime ...
 
-endlocal & setlocal enabledelayedexpansion
+endlocal & set "WREN_HOME=%WREN_HOME%" & set "PATH=%PATH%" & setlocal enabledelayedexpansion
 cd /d "%SCRIPT_DIR%"
 set "PROJECT_DIR=%~dp0wren_project"
 for %%I in ("%SCRIPT_DIR%..\..") do set "LANGCHAIN_DIR=%%~fI"
@@ -210,9 +266,16 @@ if exist ".env" (
     for /f "usebackq delims=" %%a in (".env") do (
         set "line=%%a"
         if not "!line:~0,1!"=="#" if not "!line!"=="" (
-            for /f "tokens=1,* delims==" %%b in ("!line!") do (
+            for /f "tokens=1 delims=#" %%d in ("!line!") do set "line_no_comment=%%d"
+            for /f "tokens=1,* delims==" %%b in ("!line_no_comment!") do (
                 set "key=%%b"
                 set "val=%%c"
+                for /l %%p in (1,1,8) do (
+                    if "!val:~-1!"==" " set "val=!val:~0,-1!"
+                )
+                for /l %%p in (1,1,8) do (
+                    if "!val:~0,1!"==" " set "val=!val:~1!"
+                )
                 if "!val:~0,1!"==""^"" if "!val:~-1!"==""^"" set "val=!val:~1,-1!"
                 set "!key!=!val!"
             )
