@@ -209,6 +209,46 @@ async def lifespan(app: FastAPI):
         try:
             # Lazy import so standard run doesn't crash if packages are missing
             from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
+            from contextlib import contextmanager
+
+            class ReconnectingPyMySQLSaver(PyMySQLSaver):
+                def _ping(self):
+                    try:
+                        if self.conn:
+                            self.conn.ping(reconnect=True)
+                    except Exception as e:
+                        print(f"Failed to ping/reconnect MySQL database: {e}")
+
+                def setup(self, *args, **kwargs):
+                    self._ping()
+                    return super().setup(*args, **kwargs)
+
+                def get_tuple(self, *args, **kwargs):
+                    self._ping()
+                    return super().get_tuple(*args, **kwargs)
+
+                def list(self, *args, **kwargs):
+                    self._ping()
+                    return super().list(*args, **kwargs)
+
+                def put(self, *args, **kwargs):
+                    self._ping()
+                    return super().put(*args, **kwargs)
+
+                def put_writes(self, *args, **kwargs):
+                    self._ping()
+                    return super().put_writes(*args, **kwargs)
+
+                @classmethod
+                @contextmanager
+                def from_conn_string(cls, conn_string: str):
+                    with PyMySQLSaver.from_conn_string(conn_string) as parent_saver:
+                        if isinstance(parent_saver, cls):
+                            yield parent_saver
+                        else:
+                            serde = getattr(parent_saver, "serde", None)
+                            saver = cls(connection=parent_saver.conn, serde=serde)
+                            yield saver
             
             # Autocommit=True is mandatory for .setup() to succeed in MySQL
             if "autocommit" not in db_uri.lower():
@@ -216,9 +256,9 @@ async def lifespan(app: FastAPI):
                 db_uri = f"{db_uri}{separator}autocommit=true"
             
             # Enter the context manager at startup so the pool stays alive during app yield
-            with PyMySQLSaver.from_conn_string(db_uri) as checkpointer:
+            with ReconnectingPyMySQLSaver.from_conn_string(db_uri) as checkpointer:
                 checkpointer.setup()
-                print("Successfully initialized persistent MySQL checkpointer!")
+                print("Successfully initialized persistent MySQL checkpointer with auto-reconnection!")
                 langgraph_app = build_app(toolkit, checkpointer)
                 yield  # Let the FastAPI server run
         except ImportError:
