@@ -178,7 +178,7 @@ if exist ".env" (
                     for /l %%p in (1,1,8) do (
                         if "!val:~0,1!"==" " set "val=!val:~1!"
                     )
-                    if "!val:~0,1!"==""^"" if "!val:~-1!"==""^"" set "val=!val:~1,-1!"
+                    set "val=!val:"=!"
                     set "!key!=!val!"
                     
                     :: Print loaded variables with sensitive data masking
@@ -366,7 +366,7 @@ if exist ".env" (
                     for /l %%p in (1,1,8) do (
                         if "!val:~0,1!"==" " set "val=!val:~1!"
                     )
-                    if "!val:~0,1!"==""^"" if "!val:~-1!"==""^"" set "val=!val:~1,-1!"
+                    set "val=!val:"=!"
                     set "!key!=!val!"
                 )
             )

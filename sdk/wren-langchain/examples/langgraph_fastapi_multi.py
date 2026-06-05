@@ -190,7 +190,12 @@ async def lifespan(app: FastAPI):
     """Lifecycle context manager to initialize the Wren Toolkit at startup."""
     global toolkit, langgraph_app
     project_path = os.environ.get("PROJECT_PATH")
+    if project_path:
+        project_path = project_path.strip().strip('"').strip("'")
+
     db_uri = os.environ.get("CHAT_HISTORY_DB_URI")
+    if db_uri:
+        db_uri = db_uri.strip().strip('"').strip("'")
 
     # On Windows, 'localhost' often resolves to IPv6 '::1', which causes connection failure (WinError 10061)
     # if MySQL is only listening on IPv4 (127.0.0.1). We can replace 'localhost' with '127.0.0.1' on Windows.
