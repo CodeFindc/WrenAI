@@ -16,7 +16,7 @@ cd /d "%SCRIPT_DIR%"
 :: examples dir  = sdk/wren-langchain/examples
 :: langchain dir = sdk/wren-langchain
 :: core dir      = core/wren
-pushd "%SCRIPT_DIR%..\.." >nul
+pushd "%SCRIPT_DIR%.." >nul
 set "LANGCHAIN_DIR=%cd%"
 popd >nul
 pushd "%SCRIPT_DIR%..\..\..\core\wren" >nul
@@ -260,7 +260,7 @@ echo [9/10] Reloading .env for server runtime ...
 endlocal & set "WREN_HOME=%WREN_HOME%" & set "PATH=%PATH%" & setlocal enabledelayedexpansion
 cd /d "%SCRIPT_DIR%"
 set "PROJECT_DIR=%~dp0wren_project"
-for %%I in ("%SCRIPT_DIR%..\..") do set "LANGCHAIN_DIR=%%~fI"
+for %%I in ("%SCRIPT_DIR%..") do set "LANGCHAIN_DIR=%%~fI"
 
 if exist ".env" (
     for /f "usebackq delims=" %%a in (".env") do (
