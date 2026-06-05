@@ -8,7 +8,7 @@ echo ============================================
 echo   Wren FastAPI Multi-Session Server
 echo ============================================
 echo.
-
+set PYTHONUTF8=1
 set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
 
