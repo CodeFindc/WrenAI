@@ -47,7 +47,7 @@ if exist "%LANGCHAIN_DIR%\pyproject.toml.bak" (
 echo [1/10] Installing / checking dependencies ...
 
 echo   1a. Installing core/wren package ...
-pip install -e "%CORE_DIR%" --quiet > "%SCRIPT_DIR%pip_core.log" 2>&1
+pip install -e "%CORE_DIR%" ".[all]" --quiet > "%SCRIPT_DIR%pip_core.log" 2>&1
 set "PIP_ERR=!ERRORLEVEL!"
 if !PIP_ERR! neq 0 (
     type "%SCRIPT_DIR%pip_core.log"
