@@ -100,19 +100,45 @@ if exist ".env" (
     echo [2/10] Loading environment variables from .env ...
     for /f "usebackq delims=" %%a in (".env") do (
         set "line=%%a"
-        if not "!line:~0,1!"=="#" if not "!line!"=="" (
+        if not "!line!"=="" if not "!line:~0,1!"=="#" (
             for /f "tokens=1 delims=#" %%d in ("!line!") do set "line_no_comment=%%d"
-            for /f "tokens=1,* delims==" %%b in ("!line_no_comment!") do (
-                set "key=%%b"
-                set "val=%%c"
-                for /l %%p in (1,1,8) do (
-                    if "!val:~-1!"==" " set "val=!val:~0,-1!"
+            if not "!line_no_comment:==!"=="!line_no_comment!" (
+                for /f "tokens=1,* delims==" %%b in ("!line_no_comment!") do (
+                    set "key=%%b"
+                    set "val=%%c"
+                    for /l %%p in (1,1,8) do (
+                        if "!key:~-1!"==" " set "key=!key:~0,-1!"
+                    )
+                    for /l %%p in (1,1,8) do (
+                        if "!key:~0,1!"==" " set "key=!key:~1!"
+                    )
+                    for /l %%p in (1,1,8) do (
+                        if "!val:~-1!"==" " set "val=!val:~0,-1!"
+                    )
+                    for /l %%p in (1,1,8) do (
+                        if "!val:~0,1!"==" " set "val=!val:~1!"
+                    )
+                    if "!val:~0,1!"==""^"" if "!val:~-1!"==""^"" set "val=!val:~1,-1!"
+                    set "!key!=!val!"
+                    
+                    :: Print loaded variables with sensitive data masking
+                    set "masked_val=!val!"
+                    set "is_sensitive="
+                    set "test=!key:key=!"
+                    if not "!test!"=="!key!" set "is_sensitive=1"
+                    set "test=!key:pass=!"
+                    if not "!test!"=="!key!" set "is_sensitive=1"
+                    set "test=!key:secret=!"
+                    if not "!test!"=="!key!" set "is_sensitive=1"
+                    set "test=!key:token=!"
+                    if not "!test!"=="!key!" set "is_sensitive=1"
+                    
+                    if defined is_sensitive (
+                        set "masked_val=********"
+                        if "!val!"=="" set "masked_val="
+                    )
+                    echo        !key! = !masked_val!
                 )
-                for /l %%p in (1,1,8) do (
-                    if "!val:~0,1!"==" " set "val=!val:~1!"
-                )
-                if "!val:~0,1!"==""^"" if "!val:~-1!"==""^"" set "val=!val:~1,-1!"
-                set "!key!=!val!"
             )
         )
     )
@@ -262,19 +288,27 @@ for %%I in ("%SCRIPT_DIR%..") do set "LANGCHAIN_DIR=%%~fI"
 if exist ".env" (
     for /f "usebackq delims=" %%a in (".env") do (
         set "line=%%a"
-        if not "!line:~0,1!"=="#" if not "!line!"=="" (
+        if not "!line!"=="" if not "!line:~0,1!"=="#" (
             for /f "tokens=1 delims=#" %%d in ("!line!") do set "line_no_comment=%%d"
-            for /f "tokens=1,* delims==" %%b in ("!line_no_comment!") do (
-                set "key=%%b"
-                set "val=%%c"
-                for /l %%p in (1,1,8) do (
-                    if "!val:~-1!"==" " set "val=!val:~0,-1!"
+            if not "!line_no_comment:==!"=="!line_no_comment!" (
+                for /f "tokens=1,* delims==" %%b in ("!line_no_comment!") do (
+                    set "key=%%b"
+                    set "val=%%c"
+                    for /l %%p in (1,1,8) do (
+                        if "!key:~-1!"==" " set "key=!key:~0,-1!"
+                    )
+                    for /l %%p in (1,1,8) do (
+                        if "!key:~0,1!"==" " set "key=!key:~1!"
+                    )
+                    for /l %%p in (1,1,8) do (
+                        if "!val:~-1!"==" " set "val=!val:~0,-1!"
+                    )
+                    for /l %%p in (1,1,8) do (
+                        if "!val:~0,1!"==" " set "val=!val:~1!"
+                    )
+                    if "!val:~0,1!"==""^"" if "!val:~-1!"==""^"" set "val=!val:~1,-1!"
+                    set "!key!=!val!"
                 )
-                for /l %%p in (1,1,8) do (
-                    if "!val:~0,1!"==" " set "val=!val:~1!"
-                )
-                if "!val:~0,1!"==""^"" if "!val:~-1!"==""^"" set "val=!val:~1,-1!"
-                set "!key!=!val!"
             )
         )
     )
