@@ -145,42 +145,38 @@ echo [4/10] Connection profile ...
 set "PROFILES_FILE=%PROJECT_DIR%\.wren\profiles.yml"
 
 :: Only generate if profiles.yml doesn't exist
-if not exist "%PROFILES_FILE%" (
-    set "datasource=%DATASOURCE%"
-    if defined datasource (
-        echo      Generating profile '!ACTIVE_PROFILE!' (datasource: !datasource!) ...
-        (
-            echo active: !ACTIVE_PROFILE!
-            echo profiles:
-            echo   !ACTIVE_PROFILE!:
-            echo     datasource: !datasource!
-            if defined DB_HOST echo     host: !DB_HOST!
-            if defined DB_PORT echo     port: !DB_PORT!
-            if defined DB_NAME echo     database: !DB_NAME!
-            if defined DB_USER echo     user: !DB_USER!
-            if defined DB_PASSWORD echo     password: !DB_PASSWORD!
-            if defined SSL_MODE echo     ssl_mode: !SSL_MODE!
-        ) > "%PROFILES_FILE%"
-
-        :: Handle EXTRA_PROFILE_KEYS (JSON) via Python
-        if defined EXTRA_PROFILE_KEYS (
-            python -c "
-import sys, json
-try:
-    extra = json.loads(sys.argv[1])
-    for k, v in extra.items():
-        print(f'    {k}: {v}')
-except:
-    pass  # ignore invalid JSON
-" "!EXTRA_PROFILE_KEYS!" >> "%PROFILES_FILE%" 2>nul
-        )
-        echo      Profile written to !PROFILES_FILE!
-    ) else (
-        echo      DATASOURCE not set -- skipping profile generation.
-    )
-) else (
+if exist "%PROFILES_FILE%" (
     echo      profiles.yml already exists, skipping.
+    goto :profile_done
 )
+
+set "datasource=%DATASOURCE%"
+if not defined datasource (
+    echo      DATASOURCE not set -- skipping profile generation.
+    goto :profile_done
+)
+
+echo      Generating profile '!ACTIVE_PROFILE!' (datasource: !datasource!) ...
+(
+    echo active: !ACTIVE_PROFILE!
+    echo profiles:
+    echo   !ACTIVE_PROFILE!:
+    echo     datasource: !datasource!
+    if defined DB_HOST echo     host: !DB_HOST!
+    if defined DB_PORT echo     port: !DB_PORT!
+    if defined DB_NAME echo     database: !DB_NAME!
+    if defined DB_USER echo     user: !DB_USER!
+    if defined DB_PASSWORD echo     password: !DB_PASSWORD!
+    if defined SSL_MODE echo     ssl_mode: !SSL_MODE!
+) > "%PROFILES_FILE%"
+
+:: Handle EXTRA_PROFILE_KEYS (JSON) via Python
+if defined EXTRA_PROFILE_KEYS (
+    python -c "import sys, json; [print(f'    {k}: {v}') for k, v in json.loads(sys.argv[1]).items()]" "!EXTRA_PROFILE_KEYS!" >> "%PROFILES_FILE%" 2>nul
+)
+echo      Profile written to !PROFILES_FILE!
+
+:profile_done
 echo.
 
 :: ── 5. Initialize Wren project ──────────────────────────────────────────────
