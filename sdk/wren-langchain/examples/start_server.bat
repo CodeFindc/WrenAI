@@ -78,21 +78,21 @@ if !PIP_ERR! neq 0 (
 del "%SCRIPT_DIR%pip_langchain.log" >nul 2>&1
 echo      wren-langchain installed successfully.
 
-echo   1c. Installing requirements.txt ...
-pip install -r "%SCRIPT_DIR%requirements.txt" --quiet > "%SCRIPT_DIR%pip_reqs.log" 2>&1
-set "PIP_ERR=!ERRORLEVEL!"
-if !PIP_ERR! neq 0 (
-    type "%SCRIPT_DIR%pip_reqs.log"
-    del "%SCRIPT_DIR%pip_reqs.log" >nul 2>&1
-    echo.
-    echo ERROR: Failed to install requirements. Exiting.
-    pause
-    exit /b !PIP_ERR!
-)
-del "%SCRIPT_DIR%pip_reqs.log" >nul 2>&1
-echo      requirements installed successfully.
+REM echo   1c. Installing requirements.txt ...
+REM pip install -r "%SCRIPT_DIR%requirements.txt" --quiet > "%SCRIPT_DIR%pip_reqs.log" 2>&1
+REM set "PIP_ERR=!ERRORLEVEL!"
+REM if !PIP_ERR! neq 0 (
+    REM type "%SCRIPT_DIR%pip_reqs.log"
+    REM del "%SCRIPT_DIR%pip_reqs.log" >nul 2>&1
+    REM echo.
+    REM echo ERROR: Failed to install requirements. Exiting.
+    REM pause
+    REM exit /b !PIP_ERR!
+REM )
+REM del "%SCRIPT_DIR%pip_reqs.log" >nul 2>&1
+REM echo      requirements installed successfully.
 
-echo.
+REM echo.
 
 :: ── 2. Load .env ────────────────────────────────────────────────────────────
 if exist ".env" (
