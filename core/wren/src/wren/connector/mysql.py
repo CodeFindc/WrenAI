@@ -59,6 +59,7 @@ class MySqlConnector(ConnectorABC):
         import MySQLdb  # noqa: PLC0415
 
         self._closed = False
+        self._connection_info = connection_info
         self.connection = MySQLdb.connect(
             **_build_mysql_connect_kwargs(connection_info)
         )
@@ -85,13 +86,58 @@ class MySqlConnector(ConnectorABC):
                 self._closed = True
             raise
 
+    def _is_connection_error(self, e: Exception) -> bool:
+        import MySQLdb  # noqa: PLC0415
+        if isinstance(e, MySQLdb.OperationalError):
+            args = getattr(e, "args", None)
+            if args and len(args) > 0 and args[0] in (2006, 2013):
+                return True
+        return False
+
+    def _reconnect(self) -> None:
+        import MySQLdb  # noqa: PLC0415
+        logger.info("Re-establishing lost MySQL/Doris connection...")
+        try:
+            self.connection.close()
+        except Exception:
+            pass
+
+        if isinstance(self, DorisConnector):
+            self.connection = MySQLdb.connect(
+                **_build_doris_connect_kwargs(self._connection_info)
+            )
+        else:
+            self.connection = MySQLdb.connect(
+                **_build_mysql_connect_kwargs(self._connection_info)
+            )
+            with closing(self.connection.cursor()) as cursor:
+                cursor.execute("SET sql_mode=CONCAT(@@sql_mode, ',ANSI_QUOTES')")
+
+    def _ensure_connection(self) -> None:
+        """Ping the server to check connection health. If down, perform explicit reconnect."""
+        try:
+            self.connection.ping(reconnect=False)
+        except Exception as e:
+            logger.warning(f"MySQL ping test failed: {e}. Triggering reconnect...")
+            self._reconnect()
+
     def query(self, sql: str, limit: int | None = None) -> pa.Table:
         limit = _coerce_limit(limit)
         if limit is not None:
             sql = _apply_limit(sql, limit)
-        with closing(self.connection.cursor()) as cursor:
-            cursor.execute(sql)
-            return _build_mysql_arrow_table(cursor)
+        try:
+            self._ensure_connection()
+            with closing(self.connection.cursor()) as cursor:
+                cursor.execute(sql)
+                return _build_mysql_arrow_table(cursor)
+        except Exception as e:
+            if self._is_connection_error(e):
+                logger.warning(f"MySQL connection lost during query: {e}. Retrying...")
+                self._reconnect()
+                with closing(self.connection.cursor()) as cursor:
+                    cursor.execute(sql)
+                    return _build_mysql_arrow_table(cursor)
+            raise
 
     def dry_run(self, sql: str) -> None:
         # ``EXPLAIN`` validates the SQL on the server (table lookup, column
@@ -100,9 +146,19 @@ class MySqlConnector(ConnectorABC):
         # surface duplicate column names. We strip a trailing semicolon to
         # match the same compose-ability we use for ``query``'s LIMIT path.
         explain_sql = f"EXPLAIN {sql.rstrip().rstrip(';').rstrip()}"
-        with closing(self.connection.cursor()) as cursor:
-            cursor.execute(explain_sql)
-            cursor.fetchall()
+        try:
+            self._ensure_connection()
+            with closing(self.connection.cursor()) as cursor:
+                cursor.execute(explain_sql)
+                cursor.fetchall()
+        except Exception as e:
+            if self._is_connection_error(e):
+                logger.warning(f"MySQL connection lost during dry-run: {e}. Retrying...")
+                self._reconnect()
+                with closing(self.connection.cursor()) as cursor:
+                    cursor.execute(explain_sql)
+                    cursor.fetchall()
+            raise
 
     def close(self) -> None:
         if self._closed:
@@ -124,6 +180,7 @@ class DorisConnector(MySqlConnector):
         # Skip MySqlConnector.__init__ — Doris does not accept the ANSI_QUOTES
         # init command.
         self._closed = False
+        self._connection_info = connection_info
         self.connection = MySQLdb.connect(
             **_build_doris_connect_kwargs(connection_info)
         )
