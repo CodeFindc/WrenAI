@@ -56,7 +56,7 @@ def test_mysql_connector_init_and_query_success(mock_connect, mock_connection_in
     tbl = connector.query("SELECT * FROM test")
     
     assert isinstance(tbl, pa.Table)
-    mock_conn.ping.assert_called_with(reconnect=False)
+    mock_conn.ping.assert_called_with()
 
 
 @patch("MySQLdb.connect")

@@ -116,7 +116,9 @@ class MySqlConnector(ConnectorABC):
     def _ensure_connection(self) -> None:
         """Ping the server to check connection health. If down, perform explicit reconnect."""
         try:
-            self.connection.ping(reconnect=False)
+            # MySQLdb's C-extension implementation of ping() does not support keyword arguments.
+            # Call it without keywords to ensure compatibility across MySQLdb versions.
+            self.connection.ping()
         except Exception as e:
             logger.warning(f"MySQL ping test failed: {e}. Triggering reconnect...")
             self._reconnect()
