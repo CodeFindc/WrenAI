@@ -11,6 +11,7 @@ only differs in how the connection is opened.
 from __future__ import annotations
 
 import json
+import threading
 from contextlib import closing
 from decimal import Decimal as PyDecimal
 from functools import cache
@@ -59,6 +60,7 @@ class MySqlConnector(ConnectorABC):
         import MySQLdb  # noqa: PLC0415
 
         self._closed = False
+        self._lock = threading.Lock()
         self._connection_info = connection_info
         self.connection = MySQLdb.connect(
             **_build_mysql_connect_kwargs(connection_info)
@@ -127,19 +129,20 @@ class MySqlConnector(ConnectorABC):
         limit = _coerce_limit(limit)
         if limit is not None:
             sql = _apply_limit(sql, limit)
-        try:
-            self._ensure_connection()
-            with closing(self.connection.cursor()) as cursor:
-                cursor.execute(sql)
-                return _build_mysql_arrow_table(cursor)
-        except Exception as e:
-            if self._is_connection_error(e):
-                logger.warning(f"MySQL connection lost during query: {e}. Retrying...")
-                self._reconnect()
+        with self._lock:
+            try:
+                self._ensure_connection()
                 with closing(self.connection.cursor()) as cursor:
                     cursor.execute(sql)
                     return _build_mysql_arrow_table(cursor)
-            raise
+            except Exception as e:
+                if self._is_connection_error(e):
+                    logger.warning(f"MySQL connection lost during query: {e}. Retrying...")
+                    self._reconnect()
+                    with closing(self.connection.cursor()) as cursor:
+                        cursor.execute(sql)
+                        return _build_mysql_arrow_table(cursor)
+                raise
 
     def dry_run(self, sql: str) -> None:
         # ``EXPLAIN`` validates the SQL on the server (table lookup, column
@@ -148,19 +151,20 @@ class MySqlConnector(ConnectorABC):
         # surface duplicate column names. We strip a trailing semicolon to
         # match the same compose-ability we use for ``query``'s LIMIT path.
         explain_sql = f"EXPLAIN {sql.rstrip().rstrip(';').rstrip()}"
-        try:
-            self._ensure_connection()
-            with closing(self.connection.cursor()) as cursor:
-                cursor.execute(explain_sql)
-                cursor.fetchall()
-        except Exception as e:
-            if self._is_connection_error(e):
-                logger.warning(f"MySQL connection lost during dry-run: {e}. Retrying...")
-                self._reconnect()
+        with self._lock:
+            try:
+                self._ensure_connection()
                 with closing(self.connection.cursor()) as cursor:
                     cursor.execute(explain_sql)
                     cursor.fetchall()
-            raise
+            except Exception as e:
+                if self._is_connection_error(e):
+                    logger.warning(f"MySQL connection lost during dry-run: {e}. Retrying...")
+                    self._reconnect()
+                    with closing(self.connection.cursor()) as cursor:
+                        cursor.execute(explain_sql)
+                        cursor.fetchall()
+                raise
 
     def close(self) -> None:
         if self._closed:
@@ -182,6 +186,7 @@ class DorisConnector(MySqlConnector):
         # Skip MySqlConnector.__init__ — Doris does not accept the ANSI_QUOTES
         # init command.
         self._closed = False
+        self._lock = threading.Lock()
         self._connection_info = connection_info
         self.connection = MySQLdb.connect(
             **_build_doris_connect_kwargs(connection_info)
