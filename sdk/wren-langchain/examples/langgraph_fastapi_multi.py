@@ -412,7 +412,7 @@ def get_local_or_cdn(filename: str, cdn_url: str, media_type: str) -> Response:
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-async def serve_chat_ui():
+def serve_chat_ui():
     """Serve the compiled single-file offline chat UI at the root path."""
     dist_html_path = os.path.join(
         os.path.dirname(__file__), 
@@ -437,7 +437,7 @@ async def serve_chat_ui():
 
 
 @app.get("/docs", include_in_schema=False)
-async def custom_swagger_ui_html():
+def custom_swagger_ui_html():
     """Serve Swagger UI HTML overriding the CDN URLs with local paths."""
     return get_swagger_ui_html(
         openapi_url=app.openapi_url,
@@ -449,7 +449,7 @@ async def custom_swagger_ui_html():
 
 
 @app.get("/static/swagger-ui-bundle.js", include_in_schema=False)
-async def get_swagger_js():
+def get_swagger_js():
     return get_local_or_cdn(
         "swagger-ui-bundle.js",
         "https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js",
@@ -458,7 +458,7 @@ async def get_swagger_js():
 
 
 @app.get("/static/swagger-ui.css", include_in_schema=False)
-async def get_swagger_css():
+def get_swagger_css():
     return get_local_or_cdn(
         "swagger-ui.css",
         "https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css",
@@ -467,7 +467,7 @@ async def get_swagger_css():
 
 
 @app.get("/static/favicon.png", include_in_schema=False)
-async def get_swagger_favicon():
+def get_swagger_favicon():
     os.makedirs(STATIC_DIR, exist_ok=True)
     local_path = os.path.join(STATIC_DIR, "favicon.png")
     
@@ -489,7 +489,7 @@ async def get_swagger_favicon():
 # ── Endpoints ──────────────────────────────────────────────────────────
 
 @app.get("/health")
-async def health_check():
+def health_check():
     """Simple health endpoint."""
     return {
         "status": "healthy",
@@ -499,7 +499,7 @@ async def health_check():
 
 
 @app.post("/chat")
-async def chat_endpoint(request: ChatRequestMulti):
+def chat_endpoint(request: ChatRequestMulti):
     """Standard non-streaming stateful chat endpoint. Persistent history is loaded and updated."""
     global langgraph_app, toolkit
     if not langgraph_app:
@@ -544,7 +544,7 @@ async def chat_endpoint(request: ChatRequestMulti):
 
 
 @app.post("/chat/stream")
-async def chat_stream_endpoint(request: ChatRequestMulti):
+def chat_stream_endpoint(request: ChatRequestMulti):
     """Streaming stateful chat endpoint. Persistent history is loaded and updated."""
     global langgraph_app, toolkit
     if not langgraph_app:
@@ -566,7 +566,7 @@ async def chat_stream_endpoint(request: ChatRequestMulti):
     actual_session_id = request.session_id or str(uuid.uuid4())
     config = {"configurable": {"thread_id": actual_session_id}}
 
-    async def event_generator():
+    def event_generator():
         try:
             # Yield events node by node, persisting history into the thread
             for event in langgraph_app.stream(
@@ -590,7 +590,7 @@ async def chat_stream_endpoint(request: ChatRequestMulti):
 
 
 @app.get("/chat/history/{session_id}")
-async def get_session_history(session_id: str):
+def get_session_history(session_id: str):
     """Retrieve full conversation history of a specific session ID from checkpointer."""
     global langgraph_app
     if not langgraph_app:
