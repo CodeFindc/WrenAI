@@ -11,6 +11,7 @@ only differs in how the connection is opened.
 from __future__ import annotations
 
 import json
+import queue
 import threading
 from contextlib import closing
 from decimal import Decimal as PyDecimal
@@ -52,41 +53,118 @@ def _coerce_limit(limit: int | None) -> int | None:
         raise ValueError(f"limit must be non-negative, got {coerced}")
     return coerced
 
+class ConnectionPool:
+    """Thread-safe connection pool supporting lazy init, validation on borrow, and init callback."""
+
+    def __init__(self, creator, max_connections=10, init_func=None, **connect_kwargs):
+        self._creator = creator
+        self._connect_kwargs = connect_kwargs
+        self._init_func = init_func
+        self._pool = queue.Queue(maxsize=max_connections)
+        self._max_connections = max_connections
+        self._created_connections = 0
+        self._lock = threading.Lock()
+
+    def get_connection(self):
+        # 1. Try to get an idle connection from the pool
+        try:
+            conn = self._pool.get_nowait()
+            try:
+                conn.ping()
+                return conn
+            except Exception:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                return self._create_connection()
+        except queue.Empty:
+            pass
+
+        # 2. If pool has space, create a new one
+        with self._lock:
+            if self._created_connections < self._max_connections:
+                conn = self._create_connection()
+                self._created_connections += 1
+                return conn
+
+        # 3. Otherwise block until a connection is returned
+        conn = self._pool.get(block=True)
+        try:
+            conn.ping()
+            return conn
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            return self._create_connection()
+
+    def return_connection(self, conn):
+        try:
+            self._pool.put_nowait(conn)
+        except queue.Full:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            with self._lock:
+                self._created_connections = max(0, self._created_connections - 1)
+
+    def discard_connection(self, conn):
+        try:
+            conn.close()
+        except Exception:
+            pass
+        with self._lock:
+            self._created_connections = max(0, self._created_connections - 1)
+
+    def _create_connection(self):
+        conn = self._creator(**self._connect_kwargs)
+        if self._init_func:
+            self._init_func(conn)
+        return conn
+
+    def close(self):
+        while not self._pool.empty():
+            try:
+                conn = self._pool.get_nowait()
+                conn.close()
+            except Exception:
+                pass
+
 
 class MySqlConnector(ConnectorABC):
-    """Native MySQLdb connector that bypasses ibis-project."""
+    """Native MySQLdb connector that bypasses ibis-project using a connection pool."""
 
     def __init__(self, connection_info):
         import MySQLdb  # noqa: PLC0415
 
         self._closed = False
-        self._lock = threading.Lock()
         self._connection_info = connection_info
-        self.connection = MySQLdb.connect(
-            **_build_mysql_connect_kwargs(connection_info)
-        )
-        # Append ANSI_QUOTES to the server-configured sql_mode so identifiers
-        # quoted as "name" (the MDL convention) are accepted. CONCAT preserves
-        # the server defaults (ONLY_FULL_GROUP_BY, STRICT_TRANS_TABLES, …) —
-        # overwriting them would let queries silently behave differently than
-        # in the user's own MySQL session.
-        #
-        # If this init query fails we MUST close the connection so it isn't
-        # leaked; the cursor exception would otherwise leave a live socket
-        # held by the (now half-constructed) connector.
-        try:
-            with closing(self.connection.cursor()) as cursor:
-                cursor.execute("SET sql_mode=CONCAT(@@sql_mode, ',ANSI_QUOTES')")
-        except Exception:
+
+        # Determine connection pool capacity from kwargs if specified
+        max_connections = 10
+        if connection_info.kwargs and "max_connections" in connection_info.kwargs:
             try:
-                self.connection.close()
-            except Exception as close_err:
-                logger.warning(
-                    f"Error closing MySQL connection after init failure: {close_err}"
-                )
-            finally:
-                self._closed = True
-            raise
+                max_connections = int(connection_info.kwargs["max_connections"])
+            except Exception:
+                pass
+
+        connect_kwargs = _build_mysql_connect_kwargs(connection_info)
+        # Pop max_connections if present so it doesn't get passed down to MySQLdb.connect
+        connect_kwargs.pop("max_connections", None)
+
+        def init_connection(conn):
+            with closing(conn.cursor()) as cursor:
+                cursor.execute("SET sql_mode=CONCAT(@@sql_mode, ',ANSI_QUOTES')")
+
+        self._pool = ConnectionPool(
+            creator=MySQLdb.connect,
+            max_connections=max_connections,
+            init_func=init_connection,
+            **connect_kwargs
+        )
 
     def _is_connection_error(self, e: Exception) -> bool:
         import MySQLdb  # noqa: PLC0415
@@ -96,53 +174,27 @@ class MySqlConnector(ConnectorABC):
                 return True
         return False
 
-    def _reconnect(self) -> None:
-        import MySQLdb  # noqa: PLC0415
-        logger.info("Re-establishing lost MySQL/Doris connection...")
-        try:
-            self.connection.close()
-        except Exception:
-            pass
-
-        if isinstance(self, DorisConnector):
-            self.connection = MySQLdb.connect(
-                **_build_doris_connect_kwargs(self._connection_info)
-            )
-        else:
-            self.connection = MySQLdb.connect(
-                **_build_mysql_connect_kwargs(self._connection_info)
-            )
-            with closing(self.connection.cursor()) as cursor:
-                cursor.execute("SET sql_mode=CONCAT(@@sql_mode, ',ANSI_QUOTES')")
-
-    def _ensure_connection(self) -> None:
-        """Ping the server to check connection health. If down, perform explicit reconnect."""
-        try:
-            # MySQLdb's C-extension implementation of ping() does not support keyword arguments.
-            # Call it without keywords to ensure compatibility across MySQLdb versions.
-            self.connection.ping()
-        except Exception as e:
-            logger.warning(f"MySQL ping test failed: {e}. Triggering reconnect...")
-            self._reconnect()
-
     def query(self, sql: str, limit: int | None = None) -> pa.Table:
         limit = _coerce_limit(limit)
         if limit is not None:
             sql = _apply_limit(sql, limit)
-        with self._lock:
-            try:
-                self._ensure_connection()
-                with closing(self.connection.cursor()) as cursor:
+
+        conn = self._pool.get_connection()
+        try:
+            with closing(conn.cursor()) as cursor:
+                cursor.execute(sql)
+                return _build_mysql_arrow_table(cursor)
+        except Exception as e:
+            if self._is_connection_error(e):
+                logger.warning(f"MySQL connection lost during query: {e}. Retrying with new connection...")
+                self._pool.discard_connection(conn)
+                conn = self._pool.get_connection()
+                with closing(conn.cursor()) as cursor:
                     cursor.execute(sql)
                     return _build_mysql_arrow_table(cursor)
-            except Exception as e:
-                if self._is_connection_error(e):
-                    logger.warning(f"MySQL connection lost during query: {e}. Retrying...")
-                    self._reconnect()
-                    with closing(self.connection.cursor()) as cursor:
-                        cursor.execute(sql)
-                        return _build_mysql_arrow_table(cursor)
-                raise
+            raise
+        finally:
+            self._pool.return_connection(conn)
 
     def dry_run(self, sql: str) -> None:
         # ``EXPLAIN`` validates the SQL on the server (table lookup, column
@@ -151,28 +203,30 @@ class MySqlConnector(ConnectorABC):
         # surface duplicate column names. We strip a trailing semicolon to
         # match the same compose-ability we use for ``query``'s LIMIT path.
         explain_sql = f"EXPLAIN {sql.rstrip().rstrip(';').rstrip()}"
-        with self._lock:
-            try:
-                self._ensure_connection()
-                with closing(self.connection.cursor()) as cursor:
+        conn = self._pool.get_connection()
+        try:
+            with closing(conn.cursor()) as cursor:
+                cursor.execute(explain_sql)
+                cursor.fetchall()
+        except Exception as e:
+            if self._is_connection_error(e):
+                logger.warning(f"MySQL connection lost during dry-run: {e}. Retrying with new connection...")
+                self._pool.discard_connection(conn)
+                conn = self._pool.get_connection()
+                with closing(conn.cursor()) as cursor:
                     cursor.execute(explain_sql)
                     cursor.fetchall()
-            except Exception as e:
-                if self._is_connection_error(e):
-                    logger.warning(f"MySQL connection lost during dry-run: {e}. Retrying...")
-                    self._reconnect()
-                    with closing(self.connection.cursor()) as cursor:
-                        cursor.execute(explain_sql)
-                        cursor.fetchall()
-                raise
+            raise
+        finally:
+            self._pool.return_connection(conn)
 
     def close(self) -> None:
         if self._closed:
             return
         try:
-            self.connection.close()
+            self._pool.close()
         except Exception as e:
-            logger.warning(f"Error closing MySQL connection: {e}")
+            logger.warning(f"Error closing MySQL connection pool: {e}")
         finally:
             self._closed = True
 
@@ -186,10 +240,23 @@ class DorisConnector(MySqlConnector):
         # Skip MySqlConnector.__init__ — Doris does not accept the ANSI_QUOTES
         # init command.
         self._closed = False
-        self._lock = threading.Lock()
         self._connection_info = connection_info
-        self.connection = MySQLdb.connect(
-            **_build_doris_connect_kwargs(connection_info)
+
+        max_connections = 10
+        if connection_info.kwargs and "max_connections" in connection_info.kwargs:
+            try:
+                max_connections = int(connection_info.kwargs["max_connections"])
+            except Exception:
+                pass
+
+        connect_kwargs = _build_doris_connect_kwargs(connection_info)
+        connect_kwargs.pop("max_connections", None)
+
+        self._pool = ConnectionPool(
+            creator=MySQLdb.connect,
+            max_connections=max_connections,
+            init_func=None,
+            **connect_kwargs
         )
 
 
