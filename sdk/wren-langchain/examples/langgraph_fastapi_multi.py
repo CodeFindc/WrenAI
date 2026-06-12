@@ -491,14 +491,46 @@ async def lifespan(app: FastAPI):
                 @classmethod
                 @contextmanager
                 def from_conn_string(cls, conn_string: str):
-                    with PyMySQLSaver.from_conn_string(conn_string) as parent_saver:
-                        if isinstance(parent_saver, cls):
-                            yield parent_saver
-                        else:
-                            serde = getattr(parent_saver, "serde", None)
-                            conn_args = PyMySQLSaver.parse_conn_string(conn_string)
-                            saver = cls(conn=parent_saver.conn, serde=serde, conn_args=conn_args)
-                            yield saver
+                    import urllib.parse
+                    import pymysql
+                    
+                    parsed = urllib.parse.urlparse(conn_string)
+                    user = parsed.username
+                    password = parsed.password
+                    if password:
+                        password = urllib.parse.unquote(password)
+                    if user:
+                        user = urllib.parse.unquote(user)
+                    database = parsed.path.lstrip('/')
+                    if database:
+                        database = urllib.parse.unquote(database)
+                    
+                    conn_args = {
+                        "host": parsed.hostname or "localhost",
+                        "port": parsed.port or 3306,
+                        "user": user,
+                        "password": password or "",
+                        "database": database,
+                    }
+                    
+                    if parsed.query:
+                        params = urllib.parse.parse_qs(parsed.query)
+                        for k, v in params.items():
+                            val = v[0]
+                            if val.lower() == "true":
+                                val = True
+                            elif val.lower() == "false":
+                                val = False
+                            elif val.isdigit():
+                                val = int(val)
+                            conn_args[k] = val
+                            
+                    # Force ssl_disabled=True by default to prevent any SSL/TLS upgrades
+                    conn_args.setdefault("ssl_disabled", True)
+                    
+                    with pymysql.connect(**conn_args, autocommit=True) as conn:
+                        saver = cls(conn=conn, serde=None, conn_args=conn_args)
+                        yield saver
 
             if "autocommit" not in db_uri.lower():
                 separator = "&" if "?" in db_uri else "?"
