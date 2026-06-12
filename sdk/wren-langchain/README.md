@@ -25,6 +25,10 @@ Complete runnable demos:
   ReAct loop from LangGraph primitives (`StateGraph` + `ToolNode` +
   conditional edges). Use this when you need custom routing, state, or
   streaming.
+- [`examples/langgraph_fastapi_multi.py`](./examples/langgraph_fastapi_multi.py) — a production-grade
+  stateful FastAPI API server supporting persistent multi-turn chat sessions (via MySQL checkpointer), 
+  real-time NDJSON streaming, and dynamic tool extensions using external **Model Context Protocol (MCP)** servers.
+  See [`examples/README.md`](./examples/README.md) for configuration and usage instructions.
 
 ## Prerequisites
 

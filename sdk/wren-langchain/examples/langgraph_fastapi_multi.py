@@ -53,15 +53,17 @@ import json
 import os
 import sys
 import uuid
-from typing import Annotated, TypedDict, Literal
-from contextlib import asynccontextmanager
+import glob
+import asyncio
+from typing import Annotated, TypedDict, Literal, Any, Type, Dict, List
+from contextlib import asynccontextmanager, AsyncExitStack
 
 try:
     from fastapi import FastAPI, HTTPException, Response
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import StreamingResponse, HTMLResponse
     from fastapi.openapi.docs import get_swagger_ui_html
-    from pydantic import BaseModel, Field
+    from pydantic import BaseModel, Field, create_model
     import uvicorn
     import httpx
 except ImportError:
@@ -79,13 +81,129 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
-from langchain_core.tools import tool
+from langchain_core.tools import tool, StructuredTool
 import datetime
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
 from wren_langchain import WrenToolkit
+
+
+# ── Global MCP State & Helper Functions ─────────────────────────────────
+
+mcp_sessions: dict[str, Any] = {}
+global_mcp_tools: list[StructuredTool] = []
+mcp_exit_stack: AsyncExitStack | None = None
+
+
+def json_schema_to_pydantic(name: str, schema: dict[str, Any]) -> Type[BaseModel]:
+    """Convert a JSON Schema dict into a Pydantic BaseModel class for tool validation."""
+    fields = {}
+    properties = schema.get("properties", {})
+    required = schema.get("required", [])
+    
+    for prop_name, prop_info in properties.items():
+        prop_type = Any
+        type_str = prop_info.get("type")
+        if type_str == "string":
+            prop_type = str
+        elif type_str == "integer":
+            prop_type = int
+        elif type_str == "number":
+            prop_type = float
+        elif type_str == "boolean":
+            prop_type = bool
+        elif type_str == "array":
+            prop_type = list
+        elif type_str == "object":
+            prop_type = dict
+            
+        desc = prop_info.get("description", "")
+        # Set default to Ellipsis if required, otherwise default to None or specified default
+        default = ... if prop_name in required else prop_info.get("default", None)
+        
+        fields[prop_name] = (prop_type, Field(default=default, description=desc))
+        
+    return create_model(name, **fields)
+
+
+def load_mcp_configs(config_dir: str) -> dict[str, dict]:
+    """Scan and merge MCP configurations from all .json files in the specified directory."""
+    servers = {}
+    if not os.path.isdir(config_dir):
+        print(f"Warning: MCP_CONFIG_DIR '{config_dir}' is not a directory.")
+        return servers
+
+    # Scan all JSON files in the config directory
+    json_pattern = os.path.join(config_dir, "*.json")
+    for file_path in glob.glob(json_pattern):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    if "mcpServers" in data and isinstance(data["mcpServers"], dict):
+                        servers.update(data["mcpServers"])
+                    else:
+                        servers.update(data)
+        except Exception as e:
+            print(f"Error reading MCP config file {file_path}: {e}")
+            
+    return servers
+
+
+def convert_mcp_to_langchain(server_name: str, mcp_tool: Any) -> StructuredTool:
+    """Convert an MCP Tool definition into a LangChain StructuredTool."""
+    tool_name = mcp_tool.name
+    tool_desc = mcp_tool.description
+    input_schema = mcp_tool.inputSchema
+    
+    # Dynamically create Pydantic args_schema for validation
+    args_schema = None
+    if isinstance(input_schema, dict) and input_schema.get("properties"):
+        try:
+            class_name = f"MCP_{server_name}_{tool_name}_Args"
+            args_schema = json_schema_to_pydantic(class_name, input_schema)
+        except Exception as e:
+            print(f"Warning: failed to generate Pydantic model for {server_name}.{tool_name}: {e}")
+            
+    # Asynchronous tool execution
+    async def _acall(**kwargs) -> str:
+        session = mcp_sessions.get(server_name)
+        if not session:
+            return f"Error: MCP session for '{server_name}' is not connected."
+        try:
+            result = await session.call_tool(tool_name, kwargs)
+            text_contents = []
+            for content in result.content:
+                if hasattr(content, "text"):
+                    text_contents.append(content.text)
+                elif isinstance(content, dict) and "text" in content:
+                    text_contents.append(content["text"])
+            return "\n".join(text_contents)
+        except Exception as e:
+            return f"Error invoking MCP tool '{tool_name}' on server '{server_name}': {e}"
+            
+    # Synchronous wrapper calling asynchronous execute
+    def _call(**kwargs) -> str:
+        import anyio
+        try:
+            return anyio.from_thread.run(_acall, **kwargs)
+        except RuntimeError:
+            # Fallback if no anyio event loop running in the current thread context
+            return asyncio.run(_acall(**kwargs))
+            
+    # Prefix the tool name to avoid collisions across different servers
+    prefixed_name = f"{server_name}_{tool_name}"
+    prefixed_name = prefixed_name.replace("-", "_").replace(" ", "_")
+    
+    return StructuredTool(
+        name=prefixed_name,
+        description=tool_desc or f"Invoke {tool_name} from MCP server {server_name}",
+        func=_call,
+        coroutine=_acall,
+        args_schema=args_schema
+    )
 
 
 # ── LangGraph Setup (adapted from langgraph_demo.py with Adaptive Checkpointer) ───
@@ -108,6 +226,12 @@ def build_app(toolkit: WrenToolkit, checkpointer, model_name: str = "gpt-4o"):
     """Compile a ReAct graph that uses Wren tools and binds the provided checkpointer."""
     tools = toolkit.get_tools()
     tools.append(get_current_time)
+    
+    # Extend with discovered MCP tools
+    if global_mcp_tools:
+        print(f"Binding {len(global_mcp_tools)} MCP tools to the agent graph...")
+        tools.extend(global_mcp_tools)
+        
     system_prompt = toolkit.system_prompt()
     
     # Allow custom API base and key via environment variables for compatibility
@@ -187,18 +311,77 @@ langgraph_app = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifecycle context manager to initialize the Wren Toolkit at startup."""
-    global toolkit, langgraph_app
+    """Lifecycle context manager to initialize the Wren Toolkit, MCP sessions, and checkpointer at startup."""
+    global toolkit, langgraph_app, mcp_sessions, global_mcp_tools, mcp_exit_stack
+    
+    # 1. Initialize Wren Toolkit
     project_path = os.environ.get("PROJECT_PATH")
     if project_path:
         project_path = project_path.strip().strip('"').strip("'")
+        try:
+            print(f"Initializing WrenToolkit from project: {project_path}")
+            toolkit = WrenToolkit.from_project(project_path)
+        except Exception as e:
+            print(f"Error initializing WrenToolkit: {e}")
+            sys.exit(1)
 
+    if not os.environ.get("OPENAI_API_KEY"):
+        print("WARNING: OPENAI_API_KEY is not set. Custom endpoint configuration or key will be required.")
+
+    # 2. Initialize MCP Sessions
+    mcp_exit_stack = AsyncExitStack()
+    mcp_config_dir = os.environ.get("MCP_CONFIG_DIR")
+    if mcp_config_dir:
+        mcp_config_dir = mcp_config_dir.strip().strip('"').strip("'")
+        mcp_configs = load_mcp_configs(mcp_config_dir)
+        if mcp_configs:
+            print(f"Loaded {len(mcp_configs)} MCP server configs: {list(mcp_configs.keys())}")
+            try:
+                from mcp import ClientSession, StdioServerParameters
+                from mcp.client.stdio import stdio_client
+                from mcp.client.sse import sse_client
+                
+                for server_name, config in mcp_configs.items():
+                    try:
+                        if "url" in config:
+                            url = config["url"]
+                            print(f"Connecting to remote MCP server '{server_name}' via SSE: {url}")
+                            read_stream, write_stream = await mcp_exit_stack.enter_async_context(sse_client(url))
+                            session = await mcp_exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
+                            await session.initialize()
+                            mcp_sessions[server_name] = session
+                        elif "command" in config:
+                            cmd = config["command"]
+                            args = config.get("args", [])
+                            env = os.environ.copy()
+                            if "env" in config and isinstance(config["env"], dict):
+                                env.update(config["env"])
+                            print(f"Starting local MCP server '{server_name}' via Stdio: {cmd} {' '.join(args)}")
+                            server_params = StdioServerParameters(command=cmd, args=args, env=env)
+                            read_stream, write_stream = await mcp_exit_stack.enter_async_context(stdio_client(server_params))
+                            session = await mcp_exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
+                            await session.initialize()
+                            mcp_sessions[server_name] = session
+                        else:
+                            print(f"Skipping MCP server '{server_name}': Neither 'url' nor 'command' provided.")
+                            continue
+                            
+                        tools_result = await session.list_tools()
+                        print(f"Discovered {len(tools_result.tools)} tools from MCP server '{server_name}': {[t.name for t in tools_result.tools]}")
+                        
+                        for mcp_tool in tools_result.tools:
+                            lc_tool = convert_mcp_to_langchain(server_name, mcp_tool)
+                            global_mcp_tools.append(lc_tool)
+                    except Exception as e:
+                        print(f"Failed to connect to MCP server '{server_name}': {e}")
+            except ImportError:
+                print("Warning: 'mcp' package is not installed. Skipping MCP initialization.")
+
+    # 3. Determine Checkpointer
     db_uri = os.environ.get("CHAT_HISTORY_DB_URI")
     if db_uri:
         db_uri = db_uri.strip().strip('"').strip("'")
-
-    # On Windows, 'localhost' often resolves to IPv6 '::1', which causes connection failure (WinError 10061)
-    # if MySQL is only listening on IPv4 (127.0.0.1). We can replace 'localhost' with '127.0.0.1' on Windows.
+        
     if db_uri and sys.platform.startswith("win") and "localhost" in db_uri:
         try:
             from urllib.parse import urlparse, urlunparse
@@ -221,24 +404,14 @@ async def lifespan(app: FastAPI):
                 db_uri = urlunparse(parsed)
                 print(f"Auto-resolved 'localhost' to '127.0.0.1' in database URI for Windows compatibility.")
         except Exception as e:
-            print(f"Warning: Failed to auto-resolve localhost in CHAT_HISTORY_DB_URI: {e}")
+            print(f"Warning: Failed to auto-resolve localhost in CHAT_HISTORY_URI: {e}")
 
-    if not os.environ.get("OPENAI_API_KEY"):
-        print("WARNING: OPENAI_API_KEY is not set. Custom endpoint configuration or key will be required.")
-
-    if project_path:
-        try:
-            print(f"Initializing WrenToolkit from project: {project_path}")
-            toolkit = WrenToolkit.from_project(project_path)
-        except Exception as e:
-            print(f"Error initializing WrenToolkit: {e}")
-            sys.exit(1)
-
-    # ── Lifespan-level Adaptive Checkpointer Lifecycle ────────────────────
+    checkpointer = None
+    mysql_exit_stack = AsyncExitStack()
+    
     if db_uri and toolkit:
         print("CHAT_HISTORY_DB_URI detected. Attempting to initialize MySQL checkpointer...")
         try:
-            # Lazy import so standard run doesn't crash if packages are missing
             from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
             from contextlib import contextmanager
 
@@ -280,40 +453,38 @@ async def lifespan(app: FastAPI):
                             serde = getattr(parent_saver, "serde", None)
                             saver = cls(connection=parent_saver.conn, serde=serde)
                             yield saver
-            
-            # Autocommit=True is mandatory for .setup() to succeed in MySQL
+
             if "autocommit" not in db_uri.lower():
                 separator = "&" if "?" in db_uri else "?"
                 db_uri = f"{db_uri}{separator}autocommit=true"
-            
-            # Enter the context manager at startup so the pool stays alive during app yield
-            with ReconnectingPyMySQLSaver.from_conn_string(db_uri) as checkpointer:
-                checkpointer.setup()
-                print("Successfully initialized persistent MySQL checkpointer with auto-reconnection!")
-                langgraph_app = build_app(toolkit, checkpointer)
-                yield  # Let the FastAPI server run
+
+            checkpointer = mysql_exit_stack.enter_context(ReconnectingPyMySQLSaver.from_conn_string(db_uri))
+            checkpointer.setup()
+            print("Successfully initialized persistent MySQL checkpointer with auto-reconnection!")
         except ImportError:
             print("\nWARNING: 'langgraph-checkpoint-mysql' or 'pymysql' is not installed.")
-            print("To enable MySQL persistence, please run: pip install langgraph-checkpoint-mysql[pymysql]")
             print("Falling back to in-memory MemorySaver...")
-            from langgraph.checkpoint.memory import MemorySaver
-            checkpointer = MemorySaver()
-            langgraph_app = build_app(toolkit, checkpointer)
-            yield
         except Exception as e:
             print(f"\nERROR initializing MySQL checkpointer: {e}")
             print("Falling back to in-memory MemorySaver...")
-            from langgraph.checkpoint.memory import MemorySaver
-            checkpointer = MemorySaver()
-            langgraph_app = build_app(toolkit, checkpointer)
-            yield
-    else:
+
+    if not checkpointer:
         if toolkit:
-            print("CHAT_HISTORY_DB_URI not set. Using in-memory MemorySaver (data will clear on server reload).")
+            print("Using in-memory MemorySaver (data will clear on server reload).")
             from langgraph.checkpoint.memory import MemorySaver
             checkpointer = MemorySaver()
-            langgraph_app = build_app(toolkit, checkpointer)
+
+    # Build LangGraph app
+    if toolkit and checkpointer:
+        langgraph_app = build_app(toolkit, checkpointer)
+
+    try:
         yield
+    finally:
+        print("Cleaning up lifespan resources...")
+        mysql_exit_stack.close()
+        await mcp_exit_stack.aclose()
+        print("Lifespan cleanup complete.")
 
 
 # Disable default docs routes to intercept them for offline support
