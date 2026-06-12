@@ -65,17 +65,36 @@ Runs a command locally inside a subprocess to interface with tools (e.g., SQLite
 }
 ```
 
-#### 2. Remote SSE Servers (Network-based)
-Connects to a running remote MCP server over the network:
+#### 2. Remote Servers (Streamable HTTP / SSE)
+Connects to a running remote MCP server over the network. The server automatically infers the transport type from the URL (e.g. `streamable_http` if URL contains `/mcp`, or `sse` otherwise), but you can also configure it explicitly with the `"type"` field:
+
+##### Streamable HTTP (Recommended)
 ```json
 {
   "mcpServers": {
     "my-remote-agent": {
-      "url": "http://localhost:8080/mcp/sse"
+      "url": "http://192.168.110.9:8001/mcp",
+      "type": "streamable_http",
+      "headers": {
+        "Authorization": "Bearer token"
+      }
     }
   }
 }
 ```
+
+##### SSE (Server-Sent Events)
+```json
+{
+  "mcpServers": {
+    "my-remote-agent": {
+      "url": "http://localhost:8080/sse",
+      "type": "sse"
+    }
+  }
+}
+```
+
 
 ### How it Works
 1. At startup, the server uses `contextlib.AsyncExitStack` to establish connections to all declared MCP channels.
