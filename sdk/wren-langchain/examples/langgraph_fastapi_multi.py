@@ -443,6 +443,10 @@ async def lifespan(app: FastAPI):
             from contextlib import contextmanager
 
             class ReconnectingPyMySQLSaver(PyMySQLSaver):
+                def __init__(self, *args, conn_args: dict = None, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self.conn_args = conn_args
+
                 def _ping(self):
                     try:
                         if self.conn:
@@ -454,7 +458,11 @@ async def lifespan(app: FastAPI):
                                 self.conn.close()
                             except Exception:
                                 pass
-                            self.conn.connect()
+                            import pymysql
+                            if self.conn_args:
+                                self.conn = pymysql.connect(**self.conn_args, autocommit=True)
+                            else:
+                                self.conn.connect()
                             print("Successfully re-established clean MySQL connection!")
                         except Exception as conn_err:
                             print(f"Failed to force clean MySQL connection: {conn_err}")
@@ -488,7 +496,8 @@ async def lifespan(app: FastAPI):
                             yield parent_saver
                         else:
                             serde = getattr(parent_saver, "serde", None)
-                            saver = cls(conn=parent_saver.conn, serde=serde)
+                            conn_args = PyMySQLSaver.parse_conn_string(conn_string)
+                            saver = cls(conn=parent_saver.conn, serde=serde, conn_args=conn_args)
                             yield saver
 
             if "autocommit" not in db_uri.lower():
