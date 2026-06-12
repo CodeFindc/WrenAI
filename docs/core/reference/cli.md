@@ -96,7 +96,9 @@ Requires `target/manifest.json` and `target/catalog.json`; run `dbt build` and `
 
 ---
 
-## `wren docs` — Connection Info Reference
+## `wren docs` — Connection Info
+
+### `wren docs connection-info <datasource>`
 
 Print the required and optional connection fields for a data source.
 
@@ -121,6 +123,8 @@ pip install 'wrenai[memory,main]'
 ```
 
 All `memory` subcommands accept `--path DIR` to override the default storage location (`~/.wren/memory/`).
+
+> **Note:** The `memory` extra bundles ~800MB of large unsigned native libraries (lancedb plus sentence-transformers/torch). On macOS, the first command that loads the memory stack can trigger a one-time XProtect/Gatekeeper scan and pause for up to about a minute before it finishes; this is normal macOS behavior, not a Wren error, and happens once per install or fresh virtual environment. With lazy memory loading, lightweight non-`memory` commands are unaffected — the scan is deferred to your first real memory use, not eliminated.
 
 ### Hybrid strategy: full text vs. embedding search
 
@@ -249,7 +253,7 @@ Pretty-print the full cube schema as JSON: `baseObject`, measures (with
 expressions), dimensions, time dimensions, hierarchies.
 
 ```bash
-wren cube describe order_metrics
+wren cube describe revenue
 ```
 
 ### `wren cube query`
@@ -261,10 +265,10 @@ the same path as `wren --sql`. Two input modes:
 
 ```bash
 wren cube query \
-  --cube order_metrics \
-  --measures revenue,order_count \
+  --cube revenue \
+  --measures total,order_count \
   --dimensions status \
-  --time-dimension "created_at:month:2024-01-01,2025-01-01" \
+  --time-dimension "order_date:month:2024-01-01,2025-01-01" \
   --filter "status:eq:completed" \
   --limit 100
 ```
@@ -295,3 +299,148 @@ cat query.json | wren cube query --from -
 
 See the [Cube guide](../guides/cubes.md) for YAML structure and
 validation rules.
+
+---
+
+## `wren skills` — Agent Workflow Guides
+
+The CLI ships its own agent skill content. Use this on any AI client (the
+content is the same — content travels with the wheel, not the agent cache).
+
+### `wren skills list`
+
+List the available workflow guides.
+
+```bash
+wren skills list
+```
+
+### `wren skills get <name>`
+
+Print a skill's main guide to stdout. Five names ship today:
+`onboarding`, `usage`, `generate-mdl`, `dlt-connector`, `enrich-context`.
+
+```bash
+wren skills get onboarding              # set up Wren end-to-end
+wren skills get usage                   # day-to-day querying
+wren skills get generate-mdl            # MDL from a database schema
+wren skills get dlt-connector           # connect SaaS sources via dlt
+wren skills get enrich-context          # add business context (units, enums, cubes)
+```
+
+### `wren skills get <name> --full`
+
+Include the skill's reference docs inline (sorted, separated). For skills
+that have no `references/`, the output is identical to the non-`--full` form.
+
+### `wren skills get <name> --script <s>`
+
+Print a bundled script's source to stdout. Currently:
+
+```bash
+wren skills get dlt-connector --script introspect_dlt > introspect_dlt.py
+python introspect_dlt.py --duckdb-path ./pipeline.duckdb --output-dir ./project
+```
+
+---
+
+## `wren ask` — Prompt Shaping
+
+Wrap a natural-language question in one of two bundled templates and print
+the rendered prompt to stdout. **Does not execute any query** — it
+produces a prompt for an agent to consume.
+
+You must explicitly pick one mode (no default — silently changing a
+default would alter agent behavior across an upgrade).
+
+### `wren ask "<question>" --guided`
+
+For weaker LLMs. Prepends a strict task flow (`wren context show` →
+`wren memory recall` → write SQL → `wren dry-plan` → `wren query`).
+
+```bash
+wren ask "top 5 customers by revenue" --guided
+```
+
+### `wren ask "<question>" --direct`
+
+For stronger LLMs. Minimal wrapping; the agent decides which wren commands
+to run.
+
+```bash
+wren ask "monthly orders trend" --direct
+```
+
+## `wren genbi` — Build & Deploy GenBI Apps
+
+Turn a project's context layer into a shareable, browser-side GenBI web app
+(powered by `wren-core-wasm`) and deploy it to Vercel or Cloudflare Pages.
+
+**CLI ↔ agent split:** the CLI owns the authoritative build instruction and all
+deterministic state (the app index, verify, deploy). The agent authors the app
+code by following the instruction. `.wren/apps.yml` is only ever written by the
+CLI — never by hand. The matching agent workflow guide is `wren skills get
+genbi`.
+
+### `wren genbi build <name>`
+
+Print a project-hydrated build instruction (wasm wiring with the pinned
+`wren-core-wasm` version, the project's model/column inventory, data-mode
+guidance, acceptance criteria, and the target folder). Writes no app files; it
+only compiles `target/mdl.json` first if it's missing.
+
+```bash
+wren genbi build sales-overview --prompt "orders dashboard" --data-mode snapshot
+# --prompt-file <file> / --prompt -    read a long prompt from a file or stdin
+# --data-mode snapshot|live            snapshot (default): bundle data with the app
+#                                      live: app calls a CORS endpoint at view time
+```
+
+### `wren genbi register <name>` / `list` / `remove <name>`
+
+Machine-written app index (`<project>/.wren/apps.yml`).
+
+```bash
+wren genbi register sales-overview --data-mode snapshot   # record an authored app
+wren genbi list                                           # apps + status + deploy state
+wren genbi remove sales-overview                          # drop index entry (files kept)
+```
+
+App names must be simple slugs (letters, numbers, `_`, `-`); names containing
+path separators are rejected so they can't escape `<project>/apps/`.
+
+### `wren genbi verify <name>`
+
+Deterministic deploy preflight (no browser): required files exist, `mdl.json`
+parses, snapshot apps ship a `.parquet`/`.duckdb` asset, and a default-deny
+secret scan flags inlined credentials. `deploy` gates on this. The secret scan
+is best-effort defense-in-depth, not a guarantee — never inline secrets.
+
+### `wren genbi open <name>`
+
+Serve a built app locally for preview (blocking; Ctrl-C stops).
+
+```bash
+wren genbi open sales-overview --port 8848   # 0 = auto-pick
+```
+
+### `wren genbi deploy <name>`
+
+Verify, then ship to the user's provider account and return a shareable URL.
+Preview by default; `--prod` deploys to production (confirm with the user
+first).
+
+```bash
+wren genbi deploy sales-overview --provider vercel        # or cloudflare
+wren genbi deploy sales-overview --provider vercel --prod
+```
+
+- **Tokens** are discovered from the environment or `.env` files
+  (`VERCEL_TOKEN` / `CLOUDFLARE_API_TOKEN`) — never passed as CLI flags.
+  Cloudflare also needs `CLOUDFLARE_ACCOUNT_ID`.
+- **Cloudflare** shells out to the `wrangler` CLI (`npm install -g wrangler`,
+  or have `npx` available) — Pages has no single inline-upload REST endpoint.
+- **Vercel Deployment Protection:** new Vercel projects return HTTP 401 to
+  logged-out visitors by default. To make the URL public, disable it at
+  Project → Settings → Deployment Protection. The deploy itself succeeded;
+  the URL is just gated.

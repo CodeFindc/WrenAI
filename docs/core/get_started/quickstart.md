@@ -13,7 +13,7 @@ This guide drops three things on you in the first few steps. Skim before you sta
 - **Wren CLI (`wren`)** — the Python CLI that runs all of this. Connects to a database, holds your modeling files, executes SQL through the semantic layer, manages a local memory index. ([CLI reference →](/oss/reference/cli))
 - **MDL (Modeling Definition Language)** — YAML files under `models/`, `views/`, and `relationships.yml` that describe your tables, columns, and joins in business terms. The agent reads MDL instead of guessing from raw schema. ([MDL concept →](/oss/concepts/what_is_mdl) · [Wren project guide →](/oss/reference/mdl))
 - **jaffle_shop** — a public sample database from dbt Labs. We use it so you do not need to bring your own database to follow this quickstart. It is a fictional ecommerce business with `customers`, `orders`, `products`, and `supplies`. *(Want to skip jaffle_shop and use your own database? Finish the install in step 2 then jump to [Connect your database](/oss/guides/connect).)*
-- **Skills** — markdown workflow guides that tell an AI coding agent (Claude Code, Openclaw, Hermes, Codex, etc.) how to operate the CLI. Two skills drive this quickstart: `wren-generate-mdl` (one-time scaffolding) and `wren-usage` (day-to-day querying). ([Skills concept →](/oss/reference/skills))
+- **Skills** — markdown workflow guides that tell an AI coding agent (Claude Code, Openclaw, Hermes, Codex, etc.) how to operate the CLI. You install one `wren` discovery stub; it fetches the guides from the CLI on demand. Two guides drive this quickstart: `generate-mdl` (one-time scaffolding) and `usage` (day-to-day querying). ([Skills concept →](/oss/reference/skills))
 
 ---
 
@@ -88,26 +88,26 @@ wren version
 
 ---
 
-## Step 3 — Install CLI skills
+## Step 3 — Install the CLI skill
 
-Skills are workflow guides that tell your AI coding agent how to use the Wren CLI effectively. Install the skill bundle:
+Skills are workflow guides that tell your AI coding agent how to use the Wren CLI effectively. Install the discovery stub — it fetches the guides from the CLI on demand:
 
 ```bash
-npx skills add Canner/WrenAI --skill '*'
+npx skills add Canner/WrenAI
 # or:
 curl -fsSL https://raw.githubusercontent.com/Canner/WrenAI/main/skills/install.sh | bash
 ```
 
-The CLI auto-detects your installed agent. To target a specific one, add `--agent <name>` (e.g., `claude-code`, `cursor`, `windsurf`, `cline`).
+The CLI auto-detects your installed agent. To target a specific one, add `--agent <name>` (e.g., `claude-code`, `cursor`, `windsurf`, `cline`). Only one skill (`wren`) is installed; the workflow guides below are served on demand with `wren skills get <name>`.
 
-This quickstart uses two of the installed skills:
+This quickstart uses two of those guides:
 
-| Skill | Purpose |
+| Guide | Purpose |
 |-------|---------|
-| **wren-usage** | Day-to-day workflow — gather context, recall past queries, write SQL, store results |
-| **wren-generate-mdl** | One-time setup — explore database schema and generate the MDL project |
+| **usage** | Day-to-day workflow — gather context, recall past queries, write SQL, store results |
+| **generate-mdl** | One-time setup — explore database schema and generate the MDL project |
 
-For the full skill list (including `wren-onboarding` and `wren-dlt-connector`), see the [Skills reference](/oss/reference/skills).
+For the full guide list (including `onboarding` and `dlt-connector`), see the [Skills reference](/oss/reference/skills).
 
 ---
 
@@ -182,6 +182,7 @@ This creates:
 ├── wren_project.yml        # project metadata
 ├── models/                 # one folder per table
 ├── views/                  # reusable SQL views
+├── cubes/                  # pre-aggregation metrics
 ├── relationships.yml       # table join definitions
 └── instructions.md         # business rules for the AI
 ```
@@ -218,9 +219,11 @@ claude
 Then ask:
 
 ```
-Use the wren-generate-mdl skill to explore the jaffle_shop database
+Use the /wren skill to explore the jaffle_shop database
 and generate the MDL for all tables. The data source is DuckDB.
 ```
+
+The `wren` skill recognizes this as a scaffolding task and pulls in the `generate-mdl` guide (`wren skills get generate-mdl`) to drive it.
 
 Claude Code will:
 
@@ -232,6 +235,8 @@ Claude Code will:
 6. **Add descriptions** — Claude may ask you to describe key tables/columns
 7. **Validate and build** — `wren context validate` → `wren context build`
 8. **Index memory** — `wren memory index` (generates seed NL-SQL examples)
+
+> **Tip:** If `wren memory index` (the indexing step above) seems to hang for tens of seconds on macOS — it hasn't. That first `wren memory` command loads large unsigned native libraries (lancedb and torch, ~800MB), and macOS runs a one-time XProtect security scan the first time they execute. This is expected macOS behavior, not a Wren problem, and it's a one-off — every later `wren memory` command runs at normal speed. To avoid the pause during a live demo, run any `wren memory` command once right after install and let it finish.
 
 After completion, verify the project:
 
@@ -258,7 +263,7 @@ What are the top 5 products by total revenue?
 Show me the monthly order count trend.
 ```
 
-Behind the scenes, Claude Code uses the **wren-usage** skill to:
+Behind the scenes, Claude Code uses the **usage** guide to:
 
 1. **Fetch context** (`wren memory fetch`) — find relevant tables and columns for your question
 2. **Recall examples** (`wren memory recall`) — find similar past queries
@@ -270,24 +275,36 @@ The more you ask, the smarter the system gets — each stored query improves fut
 
 ---
 
-## Step 8 — Query a cube (optional)
+## Step 8 — Add and query a cube (optional)
 
-If your MDL defines cubes, use the cube CLI for aggregation queries — agents
-don't have to hand-write `GROUP BY` / `DATE_TRUNC` SQL:
+A **cube** is a semantic aggregation object — a model plus declared measures, dimensions, and time grains. `generate-mdl` scaffolds tables and relationships but not cubes, so add one now with Claude Code.
+
+### Step 8a — Add a cube
+
+In Claude Code:
+
+```
+Use the /wren skill to add a cube named "revenue" over the orders model:
+total revenue as SUM(amount), an order count, broken down by status and
+monthly by order_date.
+```
+
+Claude Code drafts the cube YAML, confirms with you, writes it to `cubes/revenue/metadata.yml`, and rebuilds the manifest.
+
+> **Prefer to write it by hand?** See the [Cube guide](../guides/cubes.md) for the full YAML structure, then run `wren context build`.
+
+### Step 8b — Query the cube
 
 ```bash
 wren cube list
 
 wren cube query \
-  --cube order_metrics \
-  --measures revenue \
-  --time-dimension "created_at:month"
+  --cube revenue \
+  --measures total,order_count \
+  --time-dimension "order_date:month"
 ```
 
-Cube queries are the recommended path for aggregation when a cube covers the
-question. Lower error rate, especially on small / local models. See the
-[Cube guide](../guides/cubes.md) for the YAML structure and the
-[CLI reference](../reference/cli.md#wren-cube--pre-aggregation-queries) for all flags.
+`--time-dimension` takes `<name>:<granularity>`. Add `--dimensions status` or `--filter "status:eq:completed"` to slice further. See the [Cube guide](../guides/cubes.md) and [CLI reference](../reference/cli.md#wren-cube--pre-aggregation-queries) for all options.
 
 ---
 
@@ -308,6 +325,9 @@ After setup, your project directory looks like this:
 │   └── supplies/
 │       └── metadata.yml
 ├── views/
+├── cubes/                      # only if you did Step 8
+│   └── revenue/
+│       └── metadata.yml        # measures + dimensions for aggregation
 ├── relationships.yml           # e.g. orders → customers (many_to_one)
 ├── instructions.md             # your business rules
 ├── .wren/

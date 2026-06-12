@@ -109,8 +109,8 @@ then query them with a structured input instead of writing `GROUP BY` SQL by han
 
 ```bash
 wren cube list
-wren cube describe order_metrics
-wren cube query --cube order_metrics --measures revenue --time-dimension "created_at:month"
+wren cube describe revenue
+wren cube query --cube revenue --measures total --time-dimension "order_date:month"
 ```
 
 The translator produces `DATE_TRUNC` / `GROUP BY` / `WHERE` clauses for you and
@@ -141,6 +141,25 @@ wren memory fetch -q "customer order price"    # fetch relevant schema context
 wren memory store --nl "top customers" --sql "SELECT ..."  # store NL→SQL pair
 wren memory recall -q "best customers"         # retrieve similar past queries
 ```
+
+**7. (Optional) Build a shareable GenBI app** — turn the context layer into a
+browser-side dashboard (powered by `wren-core-wasm`) and deploy it to Vercel or
+Cloudflare Pages. The CLI owns the build instruction + deterministic state; an
+agent authors the app from it:
+
+```bash
+wren genbi build sales --prompt "orders dashboard" --data-mode snapshot  # print build instruction
+# agent authors apps/sales/ from the instruction (mdl.json + data/*.parquet)
+wren genbi register sales --data-mode snapshot   # record the app
+wren genbi verify sales                          # preflight (files, MDL, data, secret scan)
+wren genbi open sales                            # local preview
+wren genbi deploy sales --provider vercel        # ship a shareable URL (preview; --prod for production)
+```
+
+Tokens come from the env / `.env` (`VERCEL_TOKEN` / `CLOUDFLARE_API_TOKEN`),
+never CLI flags; Cloudflare needs `wrangler` installed. See the
+[GenBI guide](../../docs/core/guides/genbi.md) and the
+[CLI reference](../../docs/core/reference/cli.md#wren-genbi--build--deploy-genbi-apps).
 
 ---
 

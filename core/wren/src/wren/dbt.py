@@ -375,7 +375,10 @@ def convert_dbt_project_to_wren_project(
         ProjectFile(
             relative_path="wren_project.yml",
             content=yaml.dump(
-                project_config, default_flow_style=False, sort_keys=False
+                project_config,
+                default_flow_style=False,
+                sort_keys=False,
+                allow_unicode=True,
             ),
         ),
         ProjectFile(
@@ -384,6 +387,7 @@ def convert_dbt_project_to_wren_project(
                 {"relationships": relationships},
                 default_flow_style=False,
                 sort_keys=False,
+                allow_unicode=True,
             ),
         ),
         ProjectFile(
@@ -404,6 +408,7 @@ def convert_dbt_project_to_wren_project(
                 {"version": 1, "pairs": query_pairs},
                 default_flow_style=False,
                 sort_keys=False,
+                allow_unicode=True,
             ),
         ),
     ]
@@ -411,7 +416,9 @@ def convert_dbt_project_to_wren_project(
     files.extend(
         ProjectFile(
             relative_path=f"models/{model['name']}/metadata.yml",
-            content=yaml.dump(model, default_flow_style=False, sort_keys=False),
+            content=yaml.dump(
+                model, default_flow_style=False, sort_keys=False, allow_unicode=True
+            ),
         )
         for model in imported_models
     )
@@ -520,22 +527,21 @@ def convert_dbt_target_to_wren_profile(target: DbtTarget) -> dict[str, Any]:
         )
 
     if datasource == "databricks":
+        payload = {
+            "databricks_type": "token",
+            "server_hostname": str(
+                _require_output_field(output, "server_hostname", "host")
+            ),
+            "http_path": str(_require_output_field(output, "http_path", "httpPath")),
+            "access_token": str(
+                _require_output_field(output, "token", "access_token", "accessToken")
+            ),
+        }
+        if output.get("catalog"):
+            payload["catalog"] = str(output["catalog"])
         return _build_wren_profile(
             "databricks",
-            {
-                "databricks_type": "token",
-                "server_hostname": str(
-                    _require_output_field(output, "server_hostname", "host")
-                ),
-                "http_path": str(
-                    _require_output_field(output, "http_path", "httpPath")
-                ),
-                "access_token": str(
-                    _require_output_field(
-                        output, "token", "access_token", "accessToken"
-                    )
-                ),
-            },
+            payload,
         )
 
     if datasource == "bigquery":
