@@ -187,8 +187,9 @@ def convert_mcp_to_langchain(server_name: str, mcp_tool: Any) -> StructuredTool:
     # Synchronous wrapper calling asynchronous execute
     def _call(**kwargs) -> str:
         import anyio
+        import functools
         try:
-            return anyio.from_thread.run(_acall, **kwargs)
+            return anyio.from_thread.run(functools.partial(_acall, **kwargs))
         except RuntimeError:
             # Fallback if no anyio event loop running in the current thread context
             return asyncio.run(_acall(**kwargs))
