@@ -448,7 +448,16 @@ async def lifespan(app: FastAPI):
                         if self.conn:
                             self.conn.ping(reconnect=True)
                     except Exception as e:
-                        print(f"Failed to ping/reconnect MySQL database: {e}")
+                        print(f"Failed to ping/reconnect MySQL database: {e}. Attempting clean reconnection...")
+                        try:
+                            try:
+                                self.conn.close()
+                            except Exception:
+                                pass
+                            self.conn.connect()
+                            print("Successfully re-established clean MySQL connection!")
+                        except Exception as conn_err:
+                            print(f"Failed to force clean MySQL connection: {conn_err}")
 
                 def setup(self, *args, **kwargs):
                     self._ping()
