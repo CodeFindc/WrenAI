@@ -141,18 +141,16 @@ async def get_or_create_mcp_session(server_name: str, force_reconnect: bool = Fa
                 headers = config.get("headers")
                 if transport_type in ("streamable_http", "streamable-http", "http"):
                     print(f"Connecting to remote MCP server '{server_name}' via Streamable HTTP: {url}")
-                    client_kwargs = {}
-                    if headers:
-                        client = await stack.enter_async_context(httpx.AsyncClient(headers=headers))
-                        client_kwargs["http_client"] = client
-                    res = await stack.enter_async_context(streamable_http_client(url, **client_kwargs))
+                    client = await stack.enter_async_context(
+                        httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(300.0, connect=60.0))
+                    )
+                    res = await stack.enter_async_context(streamable_http_client(url, http_client=client))
                     read_stream, write_stream = res[0], res[1]
                 else:
                     print(f"Connecting to remote MCP server '{server_name}' via SSE: {url}")
-                    client_kwargs = {}
-                    if headers:
-                        client_kwargs["headers"] = headers
-                    read_stream, write_stream = await stack.enter_async_context(sse_client(url, **client_kwargs))
+                    read_stream, write_stream = await stack.enter_async_context(
+                        sse_client(url, headers=headers, timeout=60.0, sse_read_timeout=300.0)
+                    )
                 
                 session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
                 await session.initialize()
@@ -255,9 +253,12 @@ def convert_mcp_to_langchain(server_name: str, mcp_tool: Any) -> StructuredTool:
         try:
             session = await get_or_create_mcp_session(server_name)
         except Exception as e:
+            print(f"[MCP CLIENT] Failed to connect to MCP server '{server_name}': {e}")
             return f"Error: Failed to connect to MCP server '{server_name}': {e}"
         try:
+            print(f"[MCP CLIENT] Calling tool '{tool_name}' on server '{server_name}' with args: {kwargs}...")
             result = await session.call_tool(tool_name, kwargs)
+            print(f"[MCP CLIENT] Tool '{tool_name}' returned result content length: {len(result.content)}")
             text_contents = []
             for content in result.content:
                 if hasattr(content, "text"):
@@ -266,10 +267,12 @@ def convert_mcp_to_langchain(server_name: str, mcp_tool: Any) -> StructuredTool:
                     text_contents.append(content["text"])
             return "\n".join(text_contents)
         except Exception as e:
-            print(f"Error invoking tool '{tool_name}' on server '{server_name}': {e}. Attempting reconnection...")
+            print(f"[MCP CLIENT] Error invoking tool '{tool_name}' on server '{server_name}': {e}. Attempting reconnection...")
             try:
                 session = await get_or_create_mcp_session(server_name, force_reconnect=True)
+                print(f"[MCP CLIENT] Reconnected. Retrying tool '{tool_name}' with args: {kwargs}...")
                 result = await session.call_tool(tool_name, kwargs)
+                print(f"[MCP CLIENT] Retry succeeded. Result content length: {len(result.content)}")
                 text_contents = []
                 for content in result.content:
                     if hasattr(content, "text"):
@@ -278,6 +281,7 @@ def convert_mcp_to_langchain(server_name: str, mcp_tool: Any) -> StructuredTool:
                         text_contents.append(content["text"])
                 return "\n".join(text_contents)
             except Exception as retry_err:
+                print(f"[MCP CLIENT] Retry failed: {retry_err}")
                 return f"Error invoking MCP tool '{tool_name}' on server '{server_name}' after retry: {retry_err}"
             
     # Synchronous wrapper calling asynchronous execute
