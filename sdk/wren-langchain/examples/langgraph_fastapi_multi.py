@@ -93,8 +93,91 @@ from wren_langchain import WrenToolkit
 # ── Global MCP State & Helper Functions ─────────────────────────────────
 
 mcp_sessions: dict[str, Any] = {}
+mcp_configs_registry: dict[str, dict] = {}
+mcp_exit_stacks: dict[str, AsyncExitStack] = {}
+mcp_locks: dict[str, asyncio.Lock] = {}
 global_mcp_tools: list[StructuredTool] = []
-mcp_exit_stack: AsyncExitStack | None = None
+
+
+async def get_or_create_mcp_session(server_name: str, force_reconnect: bool = False) -> Any:
+    """Get or establish an active session with the specified MCP server, recreating it if forced."""
+    lock = mcp_locks.setdefault(server_name, asyncio.Lock())
+    async with lock:
+        if not force_reconnect and server_name in mcp_sessions:
+            return mcp_sessions[server_name]
+            
+        config = mcp_configs_registry.get(server_name)
+        if not config:
+            raise ValueError(f"No configuration found for MCP server '{server_name}'")
+            
+        # Clean up existing stack for this server if it exists
+        if server_name in mcp_exit_stacks:
+            print(f"Closing existing connection stack for MCP server '{server_name}'...")
+            try:
+                await mcp_exit_stacks[server_name].aclose()
+            except Exception as e:
+                print(f"Error closing exit stack for '{server_name}': {e}")
+            mcp_exit_stacks.pop(server_name, None)
+            mcp_sessions.pop(server_name, None)
+            
+        stack = AsyncExitStack()
+        mcp_exit_stacks[server_name] = stack
+        
+        try:
+            from mcp import ClientSession, StdioServerParameters
+            from mcp.client.stdio import stdio_client
+            from mcp.client.sse import sse_client
+            from mcp.client.streamable_http import streamable_http_client
+            
+            if "url" in config:
+                url = config["url"]
+                transport_type = config.get("type", "").lower()
+                if not transport_type:
+                    if "/mcp" in url:
+                        transport_type = "streamable_http"
+                    else:
+                        transport_type = "sse"
+                
+                headers = config.get("headers")
+                if transport_type in ("streamable_http", "streamable-http", "http"):
+                    print(f"Connecting to remote MCP server '{server_name}' via Streamable HTTP: {url}")
+                    client_kwargs = {}
+                    if headers:
+                        client = await stack.enter_async_context(httpx.AsyncClient(headers=headers))
+                        client_kwargs["http_client"] = client
+                    res = await stack.enter_async_context(streamable_http_client(url, **client_kwargs))
+                    read_stream, write_stream = res[0], res[1]
+                else:
+                    print(f"Connecting to remote MCP server '{server_name}' via SSE: {url}")
+                    client_kwargs = {}
+                    if headers:
+                        client_kwargs["headers"] = headers
+                    read_stream, write_stream = await stack.enter_async_context(sse_client(url, **client_kwargs))
+                
+                session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+                await session.initialize()
+                mcp_sessions[server_name] = session
+                return session
+            elif "command" in config:
+                cmd = config["command"]
+                args = config.get("args", [])
+                env = os.environ.copy()
+                if "env" in config and isinstance(config["env"], dict):
+                    env.update(config["env"])
+                print(f"Starting local MCP server '{server_name}' via Stdio: {cmd} {' '.join(args)}")
+                server_params = StdioServerParameters(command=cmd, args=args, env=env)
+                read_stream, write_stream = await stack.enter_async_context(stdio_client(server_params))
+                session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+                await session.initialize()
+                mcp_sessions[server_name] = session
+                return session
+            else:
+                raise ValueError(f"Neither 'url' nor 'command' provided for MCP server '{server_name}'")
+        except Exception as e:
+            await stack.aclose()
+            mcp_exit_stacks.pop(server_name, None)
+            mcp_sessions.pop(server_name, None)
+            raise e
 
 
 def json_schema_to_pydantic(name: str, schema: dict[str, Any]) -> Type[BaseModel]:
@@ -169,9 +252,10 @@ def convert_mcp_to_langchain(server_name: str, mcp_tool: Any) -> StructuredTool:
             
     # Asynchronous tool execution
     async def _acall(**kwargs) -> str:
-        session = mcp_sessions.get(server_name)
-        if not session:
-            return f"Error: MCP session for '{server_name}' is not connected."
+        try:
+            session = await get_or_create_mcp_session(server_name)
+        except Exception as e:
+            return f"Error: Failed to connect to MCP server '{server_name}': {e}"
         try:
             result = await session.call_tool(tool_name, kwargs)
             text_contents = []
@@ -182,7 +266,19 @@ def convert_mcp_to_langchain(server_name: str, mcp_tool: Any) -> StructuredTool:
                     text_contents.append(content["text"])
             return "\n".join(text_contents)
         except Exception as e:
-            return f"Error invoking MCP tool '{tool_name}' on server '{server_name}': {e}"
+            print(f"Error invoking tool '{tool_name}' on server '{server_name}': {e}. Attempting reconnection...")
+            try:
+                session = await get_or_create_mcp_session(server_name, force_reconnect=True)
+                result = await session.call_tool(tool_name, kwargs)
+                text_contents = []
+                for content in result.content:
+                    if hasattr(content, "text"):
+                        text_contents.append(content.text)
+                    elif isinstance(content, dict) and "text" in content:
+                        text_contents.append(content["text"])
+                return "\n".join(text_contents)
+            except Exception as retry_err:
+                return f"Error invoking MCP tool '{tool_name}' on server '{server_name}' after retry: {retry_err}"
             
     # Synchronous wrapper calling asynchronous execute
     def _call(**kwargs) -> str:
@@ -313,7 +409,7 @@ langgraph_app = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle context manager to initialize the Wren Toolkit, MCP sessions, and checkpointer at startup."""
-    global toolkit, langgraph_app, mcp_sessions, global_mcp_tools, mcp_exit_stack
+    global toolkit, langgraph_app, mcp_sessions, global_mcp_tools
     
     # 1. Initialize Wren Toolkit
     project_path = os.environ.get("PROJECT_PATH")
@@ -330,66 +426,20 @@ async def lifespan(app: FastAPI):
         print("WARNING: OPENAI_API_KEY is not set. Custom endpoint configuration or key will be required.")
 
     # 2. Initialize MCP Sessions
-    mcp_exit_stack = AsyncExitStack()
     mcp_config_dir = os.environ.get("MCP_CONFIG_DIR")
     if mcp_config_dir:
         mcp_config_dir = mcp_config_dir.strip().strip('"').strip("'")
         mcp_configs = load_mcp_configs(mcp_config_dir)
         if mcp_configs:
             print(f"Loaded {len(mcp_configs)} MCP server configs: {list(mcp_configs.keys())}")
+            mcp_configs_registry.update(mcp_configs)
             try:
-                from mcp import ClientSession, StdioServerParameters
-                from mcp.client.stdio import stdio_client
-                from mcp.client.sse import sse_client
-                from mcp.client.streamable_http import streamable_http_client
+                from mcp import ClientSession
                 
-                for server_name, config in mcp_configs.items():
+                for server_name in mcp_configs.keys():
                     try:
                         async def _connect_server():
-                            if "url" in config:
-                                url = config["url"]
-                                transport_type = config.get("type", "").lower()
-                                if not transport_type:
-                                    if "/mcp" in url:
-                                        transport_type = "streamable_http"
-                                    else:
-                                        transport_type = "sse"
-                                
-                                headers = config.get("headers")
-                                if transport_type in ("streamable_http", "streamable-http", "http"):
-                                    print(f"Connecting to remote MCP server '{server_name}' via Streamable HTTP: {url}")
-                                    client_kwargs = {}
-                                    if headers:
-                                        client = await mcp_exit_stack.enter_async_context(httpx.AsyncClient(headers=headers))
-                                        client_kwargs["http_client"] = client
-                                    res = await mcp_exit_stack.enter_async_context(streamable_http_client(url, **client_kwargs))
-                                    read_stream, write_stream = res[0], res[1]
-                                else:
-                                    print(f"Connecting to remote MCP server '{server_name}' via SSE: {url}")
-                                    client_kwargs = {}
-                                    if headers:
-                                        client_kwargs["headers"] = headers
-                                    read_stream, write_stream = await mcp_exit_stack.enter_async_context(sse_client(url, **client_kwargs))
-                                
-                                session = await mcp_exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
-                                await session.initialize()
-                                mcp_sessions[server_name] = session
-                            elif "command" in config:
-                                cmd = config["command"]
-                                args = config.get("args", [])
-                                env = os.environ.copy()
-                                if "env" in config and isinstance(config["env"], dict):
-                                    env.update(config["env"])
-                                print(f"Starting local MCP server '{server_name}' via Stdio: {cmd} {' '.join(args)}")
-                                server_params = StdioServerParameters(command=cmd, args=args, env=env)
-                                read_stream, write_stream = await mcp_exit_stack.enter_async_context(stdio_client(server_params))
-                                session = await mcp_exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
-                                await session.initialize()
-                                mcp_sessions[server_name] = session
-                            else:
-                                print(f"Skipping MCP server '{server_name}': Neither 'url' nor 'command' provided.")
-                                return
-                                
+                            session = await get_or_create_mcp_session(server_name)
                             tools_result = await session.list_tools()
                             print(f"Discovered {len(tools_result.tools)} tools from MCP server '{server_name}': {[t.name for t in tools_result.tools]}")
                             
@@ -461,7 +511,8 @@ async def lifespan(app: FastAPI):
                                 pass
                             import pymysql
                             if self.conn_args:
-                                self.conn = pymysql.connect(**self.conn_args, autocommit=True)
+                                self.conn_args.setdefault("autocommit", True)
+                                self.conn = pymysql.connect(**self.conn_args)
                             else:
                                 self.conn.connect()
                             print("Successfully re-established clean MySQL connection!")
@@ -528,8 +579,9 @@ async def lifespan(app: FastAPI):
                             
                     # Force ssl_disabled=True by default to prevent any SSL/TLS upgrades
                     conn_args.setdefault("ssl_disabled", True)
+                    conn_args.setdefault("autocommit", True)
                     
-                    with pymysql.connect(**conn_args, autocommit=True) as conn:
+                    with pymysql.connect(**conn_args) as conn:
                         saver = cls(conn=conn, serde=None, conn_args=conn_args)
                         yield saver
 
@@ -562,7 +614,14 @@ async def lifespan(app: FastAPI):
     finally:
         print("Cleaning up lifespan resources...")
         mysql_exit_stack.close()
-        await mcp_exit_stack.aclose()
+        for server_name, stack in list(mcp_exit_stacks.items()):
+            try:
+                print(f"Closing exit stack for MCP server '{server_name}'...")
+                await stack.aclose()
+            except Exception as e:
+                print(f"Error closing exit stack for '{server_name}': {e}")
+        mcp_exit_stacks.clear()
+        mcp_sessions.clear()
         print("Lifespan cleanup complete.")
 
 
