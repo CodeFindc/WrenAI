@@ -808,7 +808,7 @@ def health_check():
 
 
 @app.post("/chat")
-def chat_endpoint(request: ChatRequestMulti):
+async def chat_endpoint(request: ChatRequestMulti):
     """Standard non-streaming stateful chat endpoint. Persistent history is loaded and updated."""
     global langgraph_app, toolkit
     if not langgraph_app:
@@ -833,7 +833,7 @@ def chat_endpoint(request: ChatRequestMulti):
     
     try:
         # LangGraph checkpointer automatically merges this HumanMessage with previous thread checkpoints
-        final_state = langgraph_app.invoke(
+        final_state = await langgraph_app.ainvoke(
             {"messages": [HumanMessage(content=request.question)]}, 
             config=config
         )
@@ -853,7 +853,7 @@ def chat_endpoint(request: ChatRequestMulti):
 
 
 @app.post("/chat/stream")
-def chat_stream_endpoint(request: ChatRequestMulti):
+async def chat_stream_endpoint(request: ChatRequestMulti):
     """Streaming stateful chat endpoint. Persistent history is loaded and updated."""
     global langgraph_app, toolkit
     if not langgraph_app:
@@ -875,10 +875,10 @@ def chat_stream_endpoint(request: ChatRequestMulti):
     actual_session_id = request.session_id or str(uuid.uuid4())
     config = {"configurable": {"thread_id": actual_session_id}}
 
-    def event_generator():
+    async def event_generator():
         try:
             # Yield events node by node, persisting history into the thread
-            for event in langgraph_app.stream(
+            async for event in langgraph_app.astream(
                 {"messages": [HumanMessage(content=request.question)]}, 
                 config=config, 
                 stream_mode="updates"
@@ -899,7 +899,7 @@ def chat_stream_endpoint(request: ChatRequestMulti):
 
 
 @app.get("/chat/history/{session_id}")
-def get_session_history(session_id: str):
+async def get_session_history(session_id: str):
     """Retrieve full conversation history of a specific session ID from checkpointer."""
     global langgraph_app
     if not langgraph_app:
@@ -908,7 +908,7 @@ def get_session_history(session_id: str):
     config = {"configurable": {"thread_id": session_id}}
     try:
         # Retrieve state from checkpointer
-        state = langgraph_app.get_state(config)
+        state = await langgraph_app.aget_state(config)
         messages = state.values.get("messages", []) if state.values else []
         return {
             "session_id": session_id,
