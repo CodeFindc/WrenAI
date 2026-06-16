@@ -138,18 +138,22 @@ async def get_or_create_mcp_session(server_name: str, force_reconnect: bool = Fa
                     else:
                         transport_type = "sse"
                 
+                # Retrieve timeouts from environment variables with safe defaults (10 minutes read, 60s connect)
+                connect_timeout = float(os.environ.get("MCP_CONNECT_TIMEOUT", "60.0"))
+                read_timeout = float(os.environ.get("MCP_READ_TIMEOUT", "600.0"))
+                
                 headers = config.get("headers")
                 if transport_type in ("streamable_http", "streamable-http", "http"):
-                    print(f"Connecting to remote MCP server '{server_name}' via Streamable HTTP: {url}")
+                    print(f"Connecting to remote MCP server '{server_name}' via Streamable HTTP: {url} (timeout: connect={connect_timeout}s, read={read_timeout}s)")
                     client = await stack.enter_async_context(
-                        httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(300.0, connect=60.0))
+                        httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(read_timeout, connect=connect_timeout))
                     )
                     res = await stack.enter_async_context(streamable_http_client(url, http_client=client))
                     read_stream, write_stream = res[0], res[1]
                 else:
-                    print(f"Connecting to remote MCP server '{server_name}' via SSE: {url}")
+                    print(f"Connecting to remote MCP server '{server_name}' via SSE: {url} (timeout: connect={connect_timeout}s, read={read_timeout}s)")
                     read_stream, write_stream = await stack.enter_async_context(
-                        sse_client(url, headers=headers, timeout=60.0, sse_read_timeout=300.0)
+                        sse_client(url, headers=headers, timeout=connect_timeout, sse_read_timeout=read_timeout)
                     )
                 
                 session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
