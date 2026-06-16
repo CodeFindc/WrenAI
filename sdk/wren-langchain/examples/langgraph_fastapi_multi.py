@@ -101,6 +101,7 @@ initialized_mcp_servers: set[str] = set()
 mcp_retry_task: asyncio.Task | None = None
 mcp_manager_queue: asyncio.Queue = asyncio.Queue()
 mcp_manager_task: asyncio.Task | None = None
+mysql_exit_stack: AsyncExitStack = AsyncExitStack()
 
 
 async def _real_get_or_create_mcp_session(server_name: str, force_reconnect: bool = False) -> Any:
@@ -549,7 +550,7 @@ async def retry_failed_mcp_connections_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle context manager to initialize the Wren Toolkit, MCP sessions, and checkpointer at startup."""
-    global toolkit, langgraph_app, mcp_sessions, global_mcp_tools, mcp_retry_task, mcp_manager_task
+    global toolkit, langgraph_app, mcp_sessions, global_mcp_tools, mcp_retry_task, mcp_manager_task, mysql_exit_stack
     
     # Start persistent MCP manager task
     mcp_manager_task = asyncio.create_task(mcp_manager_worker())
@@ -636,7 +637,7 @@ async def lifespan(app: FastAPI):
             print(f"Warning: Failed to auto-resolve localhost in CHAT_HISTORY_URI: {e}")
 
     checkpointer = None
-    mysql_exit_stack = AsyncExitStack()
+    # mysql_exit_stack is globally defined and initialized
     
     if db_uri and toolkit:
         print("CHAT_HISTORY_DB_URI detected. Attempting to initialize MySQL checkpointer...")
@@ -975,25 +976,51 @@ def health_check():
     }
 
 
+def lazy_init_app(model_name: str = "gpt-4o"):
+    """Thread-safe and exception-safe lazy initialization for the compiled LangGraph application."""
+    global langgraph_app, toolkit
+    if langgraph_app:
+        return
+        
+    project_path = os.environ.get("PROJECT_PATH")
+    if not project_path:
+        raise HTTPException(
+            status_code=500,
+            detail="WrenToolkit not initialized. Please set PROJECT_PATH environment variable."
+        )
+    try:
+        toolkit = WrenToolkit.from_project(project_path)
+        
+        # Check if DB URI is set to use MySQL checkpointer even during lazy load
+        db_uri = os.environ.get("CHAT_HISTORY_DB_URI")
+        checkpointer = None
+        if db_uri:
+            db_uri = db_uri.strip().strip('"').strip("'")
+            if "autocommit" not in db_uri.lower():
+                separator = "&" if "?" in db_uri else "?"
+                db_uri = f"{db_uri}{separator}autocommit=true"
+            try:
+                from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
+                checkpointer = mysql_exit_stack.enter_context(ReconnectingPyMySQLSaver.from_conn_string(db_uri))
+                checkpointer.setup()
+                print("Lazy-initialized persistent MySQL checkpointer!")
+            except Exception as db_err:
+                print(f"Failed to lazy-initialize MySQL checkpointer: {db_err}. Falling back to MemorySaver...")
+                
+        if not checkpointer:
+            print("Using in-memory MemorySaver (data will clear on server reload) for lazy init.")
+            from langgraph.checkpoint.memory import MemorySaver
+            checkpointer = MemorySaver()
+            
+        langgraph_app = build_app(toolkit, checkpointer, model_name=model_name)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to lazy initialize app: {e}")
+
+
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequestMulti):
     """Standard non-streaming stateful chat endpoint. Persistent history is loaded and updated."""
-    global langgraph_app, toolkit
-    if not langgraph_app:
-        project_path = os.environ.get("PROJECT_PATH")
-        if not project_path:
-            raise HTTPException(
-                status_code=500,
-                detail="WrenToolkit not initialized. Please set PROJECT_PATH environment variable."
-            )
-        try:
-            toolkit = WrenToolkit.from_project(project_path)
-            # Default lazy load fallback uses safe in-memory MemorySaver
-            from langgraph.checkpoint.memory import MemorySaver
-            checkpointer = MemorySaver()
-            langgraph_app = build_app(toolkit, checkpointer, model_name=request.model_name)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to lazy initialize WrenToolkit: {e}")
+    lazy_init_app(model_name=request.model_name)
 
     # Generate session ID if not provided
     actual_session_id = request.session_id or str(uuid.uuid4())
@@ -1023,21 +1050,7 @@ async def chat_endpoint(request: ChatRequestMulti):
 @app.post("/chat/stream")
 async def chat_stream_endpoint(request: ChatRequestMulti):
     """Streaming stateful chat endpoint. Persistent history is loaded and updated."""
-    global langgraph_app, toolkit
-    if not langgraph_app:
-        project_path = os.environ.get("PROJECT_PATH")
-        if not project_path:
-            raise HTTPException(
-                status_code=500,
-                detail="WrenToolkit not initialized. Please set PROJECT_PATH environment variable."
-            )
-        try:
-            toolkit = WrenToolkit.from_project(project_path)
-            from langgraph.checkpoint.memory import MemorySaver
-            checkpointer = MemorySaver()
-            langgraph_app = build_app(toolkit, checkpointer, model_name=request.model_name)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to lazy initialize WrenToolkit: {e}")
+    lazy_init_app(model_name=request.model_name)
 
     # Generate session ID if not provided
     actual_session_id = request.session_id or str(uuid.uuid4())
@@ -1093,9 +1106,7 @@ async def chat_stream_endpoint(request: ChatRequestMulti):
 @app.get("/chat/history/{session_id}")
 async def get_session_history(session_id: str):
     """Retrieve full conversation history of a specific session ID from checkpointer."""
-    global langgraph_app
-    if not langgraph_app:
-        raise HTTPException(status_code=500, detail="Server not initialized. Please run a chat query first.")
+    lazy_init_app()
     
     config = {"configurable": {"thread_id": session_id}}
     try:
