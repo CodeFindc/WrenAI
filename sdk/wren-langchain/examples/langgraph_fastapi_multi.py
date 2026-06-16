@@ -97,6 +97,8 @@ mcp_configs_registry: dict[str, dict] = {}
 mcp_exit_stacks: dict[str, AsyncExitStack] = {}
 mcp_locks: dict[str, asyncio.Lock] = {}
 global_mcp_tools: list[StructuredTool] = []
+initialized_mcp_servers: set[str] = set()
+mcp_retry_task: asyncio.Task | None = None
 
 
 async def get_or_create_mcp_session(server_name: str, force_reconnect: bool = False) -> Any:
@@ -443,10 +445,59 @@ toolkit: WrenToolkit | None = None
 langgraph_app = None
 
 
+async def retry_failed_mcp_connections_loop():
+    """Background task to periodically retry connecting to failed MCP servers and load their tools."""
+    global langgraph_app
+    retry_interval = float(os.environ.get("MCP_RETRY_INTERVAL", "30.0"))
+    while True:
+        try:
+            failed_servers = set(mcp_configs_registry.keys()) - initialized_mcp_servers
+            if not failed_servers:
+                print("[MCP RETRY] All MCP servers are successfully initialized. Background retry loop exiting.")
+                break
+                
+            await asyncio.sleep(retry_interval)
+            
+            # Check again after sleep
+            failed_servers = set(mcp_configs_registry.keys()) - initialized_mcp_servers
+            if not failed_servers:
+                break
+                
+            print(f"[MCP RETRY] Retrying connection for failed MCP servers: {list(failed_servers)}")
+            for server_name in failed_servers:
+                try:
+                    async def _try_connect():
+                        session = await get_or_create_mcp_session(server_name, force_reconnect=True)
+                        tools_result = await session.list_tools()
+                        print(f"[MCP RETRY] Successfully connected to '{server_name}'! Discovered {len(tools_result.tools)} tools: {[t.name for t in tools_result.tools]}")
+                        
+                        new_tools = []
+                        for mcp_tool in tools_result.tools:
+                            lc_tool = convert_mcp_to_langchain(server_name, mcp_tool)
+                            new_tools.append(lc_tool)
+                        
+                        global_mcp_tools.extend(new_tools)
+                        initialized_mcp_servers.add(server_name)
+                        
+                        global langgraph_app
+                        langgraph_app = None
+                        print(f"[MCP RETRY] Registered tools for '{server_name}' and cleared compiled LangGraph app cache.")
+
+                    await asyncio.wait_for(_try_connect(), timeout=15.0)
+                except Exception as e:
+                    print(f"[MCP RETRY] Connection or initialization attempt to '{server_name}' failed: {e}")
+        except asyncio.CancelledError:
+            print("[MCP RETRY] Background retry loop cancelled.")
+            break
+        except Exception as loop_err:
+            print(f"[MCP RETRY] Error in background loop: {loop_err}")
+            await asyncio.sleep(retry_interval)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle context manager to initialize the Wren Toolkit, MCP sessions, and checkpointer at startup."""
-    global toolkit, langgraph_app, mcp_sessions, global_mcp_tools
+    global toolkit, langgraph_app, mcp_sessions, global_mcp_tools, mcp_retry_task
     
     # 1. Initialize Wren Toolkit
     project_path = os.environ.get("PROJECT_PATH")
@@ -483,12 +534,20 @@ async def lifespan(app: FastAPI):
                             for mcp_tool in tools_result.tools:
                                 lc_tool = convert_mcp_to_langchain(server_name, mcp_tool)
                                 global_mcp_tools.append(lc_tool)
+                            initialized_mcp_servers.add(server_name)
 
                         await asyncio.wait_for(_connect_server(), timeout=15.0)
                     except asyncio.TimeoutError:
                         print(f"Failed to connect to MCP server '{server_name}': Connection or initialization timed out after 15.0 seconds.")
                     except Exception as e:
                         print(f"Failed to connect to MCP server '{server_name}': {e}")
+                
+                # Start background reconnect task for failed servers
+                failed_servers = set(mcp_configs.keys()) - initialized_mcp_servers
+                if failed_servers:
+                    global mcp_retry_task
+                    print(f"Starting background reconnect task for failed MCP servers: {list(failed_servers)}")
+                    mcp_retry_task = asyncio.create_task(retry_failed_mcp_connections_loop())
             except ImportError:
                 print("Warning: 'mcp' package is not installed. Skipping MCP initialization.")
 
@@ -650,6 +709,13 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         print("Cleaning up lifespan resources...")
+        if mcp_retry_task:
+            print("Cancelling MCP retry background task...")
+            mcp_retry_task.cancel()
+            try:
+                await mcp_retry_task
+            except asyncio.CancelledError:
+                pass
         mysql_exit_stack.close()
         for server_name, stack in list(mcp_exit_stacks.items()):
             try:
