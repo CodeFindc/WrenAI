@@ -651,26 +651,27 @@ async def lifespan(app: FastAPI):
                     self.conn_args = conn_args
 
                 def _ping(self):
-                    try:
-                        if self.conn:
-                            self.conn.ping(reconnect=True)
-                    except Exception as e:
-                        print(f"Failed to ping/reconnect MySQL database: {e}. Attempting clean reconnection...")
+                    with self.lock:
                         try:
+                            if self.conn:
+                                self.conn.ping()
+                        except Exception as e:
+                            print(f"Failed to ping/reconnect MySQL database: {e}. Attempting clean reconnection...")
                             try:
-                                self.conn.close()
-                            except Exception:
-                                pass
-                            import pymysql
-                            if self.conn_args:
-                                self.conn_args.setdefault("autocommit", True)
-                                self.conn = pymysql.connect(**self.conn_args)
-                            else:
-                                self.conn.connect()
-                            print("Successfully re-established clean MySQL connection!")
-                        except Exception as conn_err:
-                            print(f"Failed to force clean MySQL connection: {conn_err}")
-                            raise conn_err
+                                try:
+                                    self.conn.close()
+                                except Exception:
+                                    pass
+                                import pymysql
+                                if self.conn_args:
+                                    self.conn_args.setdefault("autocommit", True)
+                                    self.conn = pymysql.connect(**self.conn_args)
+                                else:
+                                    self.conn.connect()
+                                print("Successfully re-established clean MySQL connection!")
+                            except Exception as conn_err:
+                                print(f"Failed to force clean MySQL connection: {conn_err}")
+                                raise conn_err
 
                 def setup(self, *args, **kwargs):
                     self._ping()
