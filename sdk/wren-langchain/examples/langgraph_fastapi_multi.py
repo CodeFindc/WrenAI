@@ -692,6 +692,30 @@ async def lifespan(app: FastAPI):
                     self._ping()
                     return super().put_writes(*args, **kwargs)
 
+                async def aget_tuple(self, config: RunnableConfig):
+                    import asyncio
+                    loop = asyncio.get_running_loop()
+                    return await loop.run_in_executor(None, self.get_tuple, config)
+
+                async def aput(self, config: RunnableConfig, checkpoint, metadata, new_versions):
+                    import asyncio
+                    loop = asyncio.get_running_loop()
+                    return await loop.run_in_executor(None, self.put, config, checkpoint, metadata, new_versions)
+
+                async def aput_writes(self, config: RunnableConfig, writes, task_id, task_path=""):
+                    import asyncio
+                    loop = asyncio.get_running_loop()
+                    return await loop.run_in_executor(None, self.put_writes, config, writes, task_id, task_path)
+
+                async def alist(self, config: RunnableConfig | None, *, filter=None, before=None, limit=None):
+                    import asyncio
+                    loop = asyncio.get_running_loop()
+                    def _sync_list():
+                        return list(self.list(config, filter=filter, before=before, limit=limit))
+                    items = await loop.run_in_executor(None, _sync_list)
+                    for item in items:
+                        yield item
+
                 @classmethod
                 @contextmanager
                 def from_conn_string(cls, conn_string: str):
