@@ -23,6 +23,13 @@ export interface StreamUpdate {
   tools?: {
     messages: Message[];
   };
+  progress?: {
+    server_name: string;
+    tool_name: string;
+    progress: number;
+    total: number;
+    message: string;
+  };
   error?: string;
 }
 

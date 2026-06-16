@@ -253,7 +253,36 @@ def convert_mcp_to_langchain(server_name: str, mcp_tool: Any) -> StructuredTool:
             print(f"Warning: failed to generate Pydantic model for {server_name}.{tool_name}: {e}")
             
     # Asynchronous tool execution
-    async def _acall(**kwargs) -> str:
+    # Asynchronous tool execution
+    async def _acall(*args, **kwargs) -> str:
+        # Extract config if present (LangChain passes it as keyword or positional argument)
+        config = kwargs.pop("config", None)
+        if not config and args:
+            from langchain_core.runnables import RunnableConfig
+            if isinstance(args[0], RunnableConfig):
+                config = args[0]
+                args = args[1:]
+
+        # Extract queue if present in config
+        stream_queue = None
+        if config and "configurable" in config:
+            stream_queue = config["configurable"].get("stream_queue")
+
+        async def progress_callback(progress: float, total: float | None = None, message: str | None = None):
+            print(f"[MCP PROGRESS] {server_name}.{tool_name}: {progress}/{total} - {message}")
+            if stream_queue:
+                progress_event = {
+                    "session_id": config["configurable"].get("thread_id"),
+                    "progress": {
+                        "server_name": server_name,
+                        "tool_name": tool_name,
+                        "progress": int(progress),
+                        "total": int(total) if total is not None else 10,
+                        "message": message or f"Processing step {progress}"
+                    }
+                }
+                await stream_queue.put({"type": "progress", "event": progress_event})
+
         try:
             session = await get_or_create_mcp_session(server_name)
         except Exception as e:
@@ -261,7 +290,7 @@ def convert_mcp_to_langchain(server_name: str, mcp_tool: Any) -> StructuredTool:
             return f"Error: Failed to connect to MCP server '{server_name}': {e}"
         try:
             print(f"[MCP CLIENT] Calling tool '{tool_name}' on server '{server_name}' with args: {kwargs}...")
-            result = await session.call_tool(tool_name, kwargs)
+            result = await session.call_tool(tool_name, kwargs, progress_callback=progress_callback)
             print(f"[MCP CLIENT] Tool '{tool_name}' returned result content length: {len(result.content)}")
             text_contents = []
             for content in result.content:
@@ -275,7 +304,7 @@ def convert_mcp_to_langchain(server_name: str, mcp_tool: Any) -> StructuredTool:
             try:
                 session = await get_or_create_mcp_session(server_name, force_reconnect=True)
                 print(f"[MCP CLIENT] Reconnected. Retrying tool '{tool_name}' with args: {kwargs}...")
-                result = await session.call_tool(tool_name, kwargs)
+                result = await session.call_tool(tool_name, kwargs, progress_callback=progress_callback)
                 print(f"[MCP CLIENT] Retry succeeded. Result content length: {len(result.content)}")
                 text_contents = []
                 for content in result.content:
@@ -289,14 +318,14 @@ def convert_mcp_to_langchain(server_name: str, mcp_tool: Any) -> StructuredTool:
                 return f"Error invoking MCP tool '{tool_name}' on server '{server_name}' after retry: {retry_err}"
             
     # Synchronous wrapper calling asynchronous execute
-    def _call(**kwargs) -> str:
+    def _call(*args, **kwargs) -> str:
         import anyio
         import functools
         try:
-            return anyio.from_thread.run(functools.partial(_acall, **kwargs))
+            return anyio.from_thread.run(functools.partial(_acall, *args, **kwargs))
         except RuntimeError:
             # Fallback if no anyio event loop running in the current thread context
-            return asyncio.run(_acall(**kwargs))
+            return asyncio.run(_acall(*args, **kwargs))
             
     # Prefix the tool name to avoid collisions across different servers
     prefixed_name = f"{server_name}_{tool_name}"
@@ -881,9 +910,15 @@ async def chat_stream_endpoint(request: ChatRequestMulti):
 
     # Generate session ID if not provided
     actual_session_id = request.session_id or str(uuid.uuid4())
-    config = {"configurable": {"thread_id": actual_session_id}}
+    stream_queue = asyncio.Queue()
+    config = {
+        "configurable": {
+            "thread_id": actual_session_id,
+            "stream_queue": stream_queue
+        }
+    }
 
-    async def event_generator():
+    async def run_graph():
         try:
             # Yield events node by node, persisting history into the thread
             async for event in langgraph_app.astream(
@@ -891,17 +926,35 @@ async def chat_stream_endpoint(request: ChatRequestMulti):
                 config=config, 
                 stream_mode="updates"
             ):
-                formatted_event = {
-                    "session_id": actual_session_id
-                }
-                for node_name, update in event.items():
-                    msgs = update.get("messages", [])
-                    serialized_msgs = [serialize_message(msg) for msg in msgs]
-                    formatted_event[node_name] = {"messages": serialized_msgs}
-                
-                yield json.dumps(formatted_event, ensure_ascii=False) + "\n"
+                await stream_queue.put({"type": "graph", "event": event})
+            await stream_queue.put({"type": "done"})
         except Exception as e:
-            yield json.dumps({"error": str(e)}, ensure_ascii=False) + "\n"
+            await stream_queue.put({"type": "error", "error": str(e)})
+
+    async def event_generator():
+        task = asyncio.create_task(run_graph())
+        try:
+            while True:
+                item = await stream_queue.get()
+                if item["type"] == "done":
+                    break
+                elif item["type"] == "error":
+                    yield json.dumps({"error": item["error"]}, ensure_ascii=False) + "\n"
+                    break
+                elif item["type"] == "graph":
+                    event = item["event"]
+                    formatted_event = {
+                        "session_id": actual_session_id
+                    }
+                    for node_name, update in event.items():
+                        msgs = update.get("messages", [])
+                        serialized_msgs = [serialize_message(msg) for msg in msgs]
+                        formatted_event[node_name] = {"messages": serialized_msgs}
+                    yield json.dumps(formatted_event, ensure_ascii=False) + "\n"
+                elif item["type"] == "progress":
+                    yield json.dumps(item["event"], ensure_ascii=False) + "\n"
+        finally:
+            task.cancel()
 
     return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 

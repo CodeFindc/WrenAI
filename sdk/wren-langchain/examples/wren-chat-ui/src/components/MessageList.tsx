@@ -6,6 +6,13 @@ interface MessageListProps {
   messages: Message[];
   isLoading: boolean;
   activeNode: string | null;
+  toolProgress: {
+    server_name: string;
+    tool_name: string;
+    progress: number;
+    total: number;
+    message: string;
+  } | null;
 }
 
 // Simple local Markdown parser to avoid external package loading issues offline
@@ -239,6 +246,7 @@ export const MessageList: React.FC<MessageListProps> = ({
   messages,
   isLoading,
   activeNode,
+  toolProgress,
 }) => {
   const containerEndRef = useRef<HTMLDivElement>(null);
 
@@ -362,11 +370,20 @@ export const MessageList: React.FC<MessageListProps> = ({
                 <span className="w-1.5 h-1.5 bg-blue-600 rounded-full animate-bounce shrink-0" style={{ animationDelay: '150ms' }} />
                 <span className="w-1.5 h-1.5 bg-blue-600 rounded-full animate-bounce shrink-0" style={{ animationDelay: '300ms' }} />
                 <span className="text-xs ml-2 font-medium">
-                  {activeNode === 'tools'
-                    ? 'Retrieving Wren Toolkit database data...'
-                    : activeNode === 'agent'
-                    ? 'Formulating assistant answer...'
-                    : 'Analyzing query...'}
+                  {toolProgress ? (
+                    <span className="text-slate-700">
+                      [{toolProgress.server_name}] {toolProgress.message}{' '}
+                      <span className="text-blue-600 font-semibold">
+                        ({toolProgress.progress}/{toolProgress.total})
+                      </span>
+                    </span>
+                  ) : activeNode === 'tools' ? (
+                    'Retrieving Wren Toolkit database data...'
+                  ) : activeNode === 'agent' ? (
+                    'Formulating assistant answer...'
+                  ) : (
+                    'Analyzing query...'
+                  )}
                 </span>
               </div>
             </div>

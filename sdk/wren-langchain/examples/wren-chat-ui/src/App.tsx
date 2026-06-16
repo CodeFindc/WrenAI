@@ -79,6 +79,7 @@ export const App: React.FC = () => {
   
   const [isLoading, setIsLoading] = useState(false);
   const [activeNode, setActiveNode] = useState<string | null>(null);
+  const [toolProgress, setToolProgress] = useState<Required<StreamUpdate>['progress'] | null>(null);
   
   const [backendUrl, setBackendUrl] = useState(getDefaultBackendUrl());
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -263,8 +264,13 @@ export const App: React.FC = () => {
         response,
         (update: StreamUpdate) => {
           // Process Node update
+          if (update.progress) {
+            setToolProgress(update.progress);
+          }
+
           if (update.agent) {
             setActiveNode('agent');
+            setToolProgress(null);
             const agentMsgs = update.agent.messages || [];
             
             // Merge messages safely to avoid duplicates
@@ -288,6 +294,7 @@ export const App: React.FC = () => {
           
           if (update.tools) {
             setActiveNode('tools');
+            setToolProgress(null);
             const toolMsgs = update.tools.messages || [];
             
             toolMsgs.forEach(msg => {
@@ -341,6 +348,7 @@ export const App: React.FC = () => {
     } finally {
       setIsLoading(false);
       setActiveNode(null);
+      setToolProgress(null);
     }
   };
 
@@ -374,6 +382,7 @@ export const App: React.FC = () => {
           messages={messages}
           isLoading={isLoading}
           activeNode={activeNode}
+          toolProgress={toolProgress}
         />
 
         {/* Input Form Panel */}
