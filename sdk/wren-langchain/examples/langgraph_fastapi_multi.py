@@ -99,89 +99,141 @@ mcp_locks: dict[str, asyncio.Lock] = {}
 global_mcp_tools: list[StructuredTool] = []
 initialized_mcp_servers: set[str] = set()
 mcp_retry_task: asyncio.Task | None = None
+mcp_manager_queue: asyncio.Queue = asyncio.Queue()
+mcp_manager_task: asyncio.Task | None = None
+
+
+async def _real_get_or_create_mcp_session(server_name: str, force_reconnect: bool = False) -> Any:
+    """Get or establish an active session with the specified MCP server, recreating it if forced."""
+    if not force_reconnect and server_name in mcp_sessions:
+        return mcp_sessions[server_name]
+        
+    config = mcp_configs_registry.get(server_name)
+    if not config:
+        raise ValueError(f"No configuration found for MCP server '{server_name}'")
+        
+    # Clean up existing stack for this server if it exists
+    if server_name in mcp_exit_stacks:
+        print(f"Closing existing connection stack for MCP server '{server_name}'...")
+        try:
+            await mcp_exit_stacks[server_name].aclose()
+        except Exception as e:
+            print(f"Error closing exit stack for '{server_name}': {e}")
+        mcp_exit_stacks.pop(server_name, None)
+        mcp_sessions.pop(server_name, None)
+        
+    stack = AsyncExitStack()
+    mcp_exit_stacks[server_name] = stack
+    
+    try:
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+        from mcp.client.sse import sse_client
+        from mcp.client.streamable_http import streamable_http_client
+        
+        if "url" in config:
+            url = config["url"]
+            transport_type = config.get("type", "").lower()
+            if not transport_type:
+                if "/mcp" in url:
+                    transport_type = "streamable_http"
+                else:
+                    transport_type = "sse"
+            
+            # Retrieve timeouts from environment variables with safe defaults (10 minutes read, 60s connect)
+            connect_timeout = float(os.environ.get("MCP_CONNECT_TIMEOUT", "60.0"))
+            read_timeout = float(os.environ.get("MCP_READ_TIMEOUT", "600.0"))
+            
+            headers = config.get("headers")
+            if transport_type in ("streamable_http", "streamable-http", "http"):
+                print(f"Connecting to remote MCP server '{server_name}' via Streamable HTTP: {url} (timeout: connect={connect_timeout}s, read={read_timeout}s)")
+                client = await stack.enter_async_context(
+                    httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(read_timeout, connect=connect_timeout))
+                )
+                res = await stack.enter_async_context(streamable_http_client(url, http_client=client))
+                read_stream, write_stream = res[0], res[1]
+            else:
+                print(f"Connecting to remote MCP server '{server_name}' via SSE: {url} (timeout: connect={connect_timeout}s, read={read_timeout}s)")
+                read_stream, write_stream = await stack.enter_async_context(
+                    sse_client(url, headers=headers, timeout=connect_timeout, sse_read_timeout=read_timeout)
+                )
+            
+            session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+            await session.initialize()
+            mcp_sessions[server_name] = session
+            return session
+        elif "command" in config:
+            cmd = config["command"]
+            args = config.get("args", [])
+            env = os.environ.copy()
+            if "env" in config and isinstance(config["env"], dict):
+                env.update(config["env"])
+            print(f"Starting local MCP server '{server_name}' via Stdio: {cmd} {' '.join(args)}")
+            server_params = StdioServerParameters(command=cmd, args=args, env=env)
+            read_stream, write_stream = await stack.enter_async_context(stdio_client(server_params))
+            session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+            await session.initialize()
+            mcp_sessions[server_name] = session
+            return session
+        else:
+            raise ValueError(f"Neither 'url' nor 'command' provided for MCP server '{server_name}'")
+    except Exception as e:
+        await stack.aclose()
+        mcp_exit_stacks.pop(server_name, None)
+        mcp_sessions.pop(server_name, None)
+        raise e
+
+
+async def mcp_manager_worker():
+    """Persistent task executing all MCP connection/disconnection context operations on a single task context to prevent task-mismatch cancel scope errors."""
+    while True:
+        try:
+            item = await mcp_manager_queue.get()
+            if item is None:
+                mcp_manager_queue.task_done()
+                break
+                
+            cmd, args, future = item
+            try:
+                if cmd == "connect":
+                    server_name, force_reconnect = args
+                    session = await _real_get_or_create_mcp_session(server_name, force_reconnect)
+                    if not future.cancelled():
+                        future.set_result(session)
+                elif cmd == "shutdown":
+                    # Clean up all active sessions under this task's context
+                    for server_name in list(mcp_exit_stacks.keys()):
+                        try:
+                            print(f"Closing exit stack for MCP server '{server_name}' inside manager task context...")
+                            stack = mcp_exit_stacks.pop(server_name, None)
+                            if stack:
+                                await stack.aclose()
+                        except Exception as e:
+                            print(f"Error closing exit stack for '{server_name}': {e}")
+                    mcp_sessions.clear()
+                    mcp_exit_stacks.clear()
+                    if not future.cancelled():
+                        future.set_result(True)
+                    mcp_manager_queue.task_done()
+                    break
+            except Exception as e:
+                if not future.cancelled():
+                    future.set_exception(e)
+            finally:
+                mcp_manager_queue.task_done()
+        except asyncio.CancelledError:
+            print("[MCP MANAGER] Manager worker task cancelled.")
+            break
+        except Exception as worker_err:
+            print(f"[MCP MANAGER] Unexpected error in manager loop: {worker_err}")
 
 
 async def get_or_create_mcp_session(server_name: str, force_reconnect: bool = False) -> Any:
-    """Get or establish an active session with the specified MCP server, recreating it if forced."""
-    lock = mcp_locks.setdefault(server_name, asyncio.Lock())
-    async with lock:
-        if not force_reconnect and server_name in mcp_sessions:
-            return mcp_sessions[server_name]
-            
-        config = mcp_configs_registry.get(server_name)
-        if not config:
-            raise ValueError(f"No configuration found for MCP server '{server_name}'")
-            
-        # Clean up existing stack for this server if it exists
-        if server_name in mcp_exit_stacks:
-            print(f"Closing existing connection stack for MCP server '{server_name}'...")
-            try:
-                await mcp_exit_stacks[server_name].aclose()
-            except Exception as e:
-                print(f"Error closing exit stack for '{server_name}': {e}")
-            mcp_exit_stacks.pop(server_name, None)
-            mcp_sessions.pop(server_name, None)
-            
-        stack = AsyncExitStack()
-        mcp_exit_stacks[server_name] = stack
-        
-        try:
-            from mcp import ClientSession, StdioServerParameters
-            from mcp.client.stdio import stdio_client
-            from mcp.client.sse import sse_client
-            from mcp.client.streamable_http import streamable_http_client
-            
-            if "url" in config:
-                url = config["url"]
-                transport_type = config.get("type", "").lower()
-                if not transport_type:
-                    if "/mcp" in url:
-                        transport_type = "streamable_http"
-                    else:
-                        transport_type = "sse"
-                
-                # Retrieve timeouts from environment variables with safe defaults (10 minutes read, 60s connect)
-                connect_timeout = float(os.environ.get("MCP_CONNECT_TIMEOUT", "60.0"))
-                read_timeout = float(os.environ.get("MCP_READ_TIMEOUT", "600.0"))
-                
-                headers = config.get("headers")
-                if transport_type in ("streamable_http", "streamable-http", "http"):
-                    print(f"Connecting to remote MCP server '{server_name}' via Streamable HTTP: {url} (timeout: connect={connect_timeout}s, read={read_timeout}s)")
-                    client = await stack.enter_async_context(
-                        httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(read_timeout, connect=connect_timeout))
-                    )
-                    res = await stack.enter_async_context(streamable_http_client(url, http_client=client))
-                    read_stream, write_stream = res[0], res[1]
-                else:
-                    print(f"Connecting to remote MCP server '{server_name}' via SSE: {url} (timeout: connect={connect_timeout}s, read={read_timeout}s)")
-                    read_stream, write_stream = await stack.enter_async_context(
-                        sse_client(url, headers=headers, timeout=connect_timeout, sse_read_timeout=read_timeout)
-                    )
-                
-                session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
-                await session.initialize()
-                mcp_sessions[server_name] = session
-                return session
-            elif "command" in config:
-                cmd = config["command"]
-                args = config.get("args", [])
-                env = os.environ.copy()
-                if "env" in config and isinstance(config["env"], dict):
-                    env.update(config["env"])
-                print(f"Starting local MCP server '{server_name}' via Stdio: {cmd} {' '.join(args)}")
-                server_params = StdioServerParameters(command=cmd, args=args, env=env)
-                read_stream, write_stream = await stack.enter_async_context(stdio_client(server_params))
-                session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
-                await session.initialize()
-                mcp_sessions[server_name] = session
-                return session
-            else:
-                raise ValueError(f"Neither 'url' nor 'command' provided for MCP server '{server_name}'")
-        except Exception as e:
-            await stack.aclose()
-            mcp_exit_stacks.pop(server_name, None)
-            mcp_sessions.pop(server_name, None)
-            raise e
+    """Delegate establishment of an active session to the dedicated MCP manager task."""
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    await mcp_manager_queue.put(("connect", (server_name, force_reconnect), future))
+    return await future
 
 
 def json_schema_to_pydantic(name: str, schema: dict[str, Any]) -> Type[BaseModel]:
@@ -497,7 +549,10 @@ async def retry_failed_mcp_connections_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle context manager to initialize the Wren Toolkit, MCP sessions, and checkpointer at startup."""
-    global toolkit, langgraph_app, mcp_sessions, global_mcp_tools, mcp_retry_task
+    global toolkit, langgraph_app, mcp_sessions, global_mcp_tools, mcp_retry_task, mcp_manager_task
+    
+    # Start persistent MCP manager task
+    mcp_manager_task = asyncio.create_task(mcp_manager_worker())
     
     # 1. Initialize Wren Toolkit
     project_path = os.environ.get("PROJECT_PATH")
@@ -716,15 +771,25 @@ async def lifespan(app: FastAPI):
                 await mcp_retry_task
             except asyncio.CancelledError:
                 pass
-        mysql_exit_stack.close()
-        for server_name, stack in list(mcp_exit_stacks.items()):
+                
+        # Gracefully shut down MCP sessions inside the manager task context
+        if mcp_manager_task:
+            print("Shutting down MCP sessions via manager task...")
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
             try:
-                print(f"Closing exit stack for MCP server '{server_name}'...")
-                await stack.aclose()
+                await mcp_manager_queue.put(("shutdown", (), future))
+                await asyncio.wait_for(future, timeout=10.0)
             except Exception as e:
-                print(f"Error closing exit stack for '{server_name}': {e}")
-        mcp_exit_stacks.clear()
-        mcp_sessions.clear()
+                print(f"Error during graceful MCP session manager shutdown: {e}")
+            
+            mcp_manager_task.cancel()
+            try:
+                await mcp_manager_task
+            except asyncio.CancelledError:
+                pass
+
+        await mysql_exit_stack.aclose()
         print("Lifespan cleanup complete.")
 
 
