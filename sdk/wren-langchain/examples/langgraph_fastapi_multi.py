@@ -732,6 +732,10 @@ async def lifespan(app: FastAPI):
                     # Force ssl_disabled=True by default to prevent any SSL/TLS upgrades
                     conn_args.setdefault("ssl_disabled", True)
                     conn_args.setdefault("autocommit", True)
+                    # Set connection and query timeouts to prevent indefinite socket hangs
+                    conn_args.setdefault("connect_timeout", 10)
+                    conn_args.setdefault("read_timeout", 30)
+                    conn_args.setdefault("write_timeout", 30)
                     
                     with pymysql.connect(**conn_args) as conn:
                         saver = cls(conn=conn, serde=None, conn_args=conn_args)
