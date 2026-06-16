@@ -1048,7 +1048,9 @@ async def chat_endpoint(request: ChatRequestMulti):
             }
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Execution error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Execution error: {str(e) or type(e).__name__}")
 
 
 @app.post("/chat/stream")
@@ -1077,7 +1079,9 @@ async def chat_stream_endpoint(request: ChatRequestMulti):
                 await stream_queue.put({"type": "graph", "event": event})
             await stream_queue.put({"type": "done"})
         except Exception as e:
-            await stream_queue.put({"type": "error", "error": str(e)})
+            import traceback
+            traceback.print_exc()
+            await stream_queue.put({"type": "error", "error": str(e) or type(e).__name__})
 
     async def event_generator():
         task = asyncio.create_task(run_graph())
