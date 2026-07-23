@@ -650,48 +650,53 @@ async def lifespan(app: FastAPI):
                     super().__init__(*args, **kwargs)
                     self.conn_args = conn_args
 
-                def _ping(self):
-                    with self.lock:
+                def _ping_unlocked(self):
+                    try:
+                        if self.conn:
+                            self.conn.ping(reconnect=True)
+                    except Exception as e:
+                        print(f"Failed to ping/reconnect MySQL database: {e}. Attempting clean reconnection...")
                         try:
-                            if self.conn:
-                                self.conn.ping()
-                        except Exception as e:
-                            print(f"Failed to ping/reconnect MySQL database: {e}. Attempting clean reconnection...")
                             try:
-                                try:
-                                    self.conn.close()
-                                except Exception:
-                                    pass
-                                import pymysql
-                                if self.conn_args:
-                                    self.conn_args.setdefault("autocommit", True)
-                                    self.conn = pymysql.connect(**self.conn_args)
-                                else:
-                                    self.conn.connect()
-                                print("Successfully re-established clean MySQL connection!")
-                            except Exception as conn_err:
-                                print(f"Failed to force clean MySQL connection: {conn_err}")
-                                raise conn_err
+                                self.conn.close()
+                            except Exception:
+                                pass
+                            import pymysql
+                            if self.conn_args:
+                                conn_kwargs = dict(self.conn_args)
+                                conn_kwargs.setdefault("autocommit", True)
+                                self.conn = pymysql.connect(**conn_kwargs)
+                            else:
+                                self.conn.connect()
+                            print("Successfully re-established clean MySQL connection!")
+                        except Exception as conn_err:
+                            print(f"Failed to force clean MySQL connection: {conn_err}")
+                            raise conn_err
 
                 def setup(self, *args, **kwargs):
-                    self._ping()
-                    return super().setup(*args, **kwargs)
+                    with self.lock:
+                        self._ping_unlocked()
+                        return super().setup(*args, **kwargs)
 
                 def get_tuple(self, *args, **kwargs):
-                    self._ping()
-                    return super().get_tuple(*args, **kwargs)
+                    with self.lock:
+                        self._ping_unlocked()
+                        return super().get_tuple(*args, **kwargs)
 
                 def list(self, *args, **kwargs):
-                    self._ping()
-                    return super().list(*args, **kwargs)
+                    with self.lock:
+                        self._ping_unlocked()
+                        return list(super().list(*args, **kwargs))
 
                 def put(self, *args, **kwargs):
-                    self._ping()
-                    return super().put(*args, **kwargs)
+                    with self.lock:
+                        self._ping_unlocked()
+                        return super().put(*args, **kwargs)
 
                 def put_writes(self, *args, **kwargs):
-                    self._ping()
-                    return super().put_writes(*args, **kwargs)
+                    with self.lock:
+                        self._ping_unlocked()
+                        return super().put_writes(*args, **kwargs)
 
                 async def aget_tuple(self, config: RunnableConfig):
                     import asyncio
