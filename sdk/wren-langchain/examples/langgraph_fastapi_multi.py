@@ -642,153 +642,259 @@ async def lifespan(app: FastAPI):
     checkpointer = None
     # mysql_exit_stack is globally defined and initialized
     
-    if db_uri and toolkit:
+# ── Module-Level Reconnecting PyMySQL Checkpointer ─────────────────────
+
+try:
+    from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
+    from contextlib import contextmanager
+
+    class ReconnectingPyMySQLSaver(PyMySQLSaver):
+        """Thread-safe and reconnecting PyMySQL Saver using threading.RLock to prevent reentrant deadlocks."""
+        def __init__(self, *args, conn_args: dict = None, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.conn_args = conn_args
+            # CRITICAL FIX: Override parent's Lock with RLock to prevent reentrant deadlocks during super().setup() / super().get_tuple()
+            self.lock = threading.RLock()
+
+        def _ping_unlocked(self):
+            try:
+                if self.conn:
+                    self.conn.ping()
+            except Exception as e:
+                print(f"Failed to ping/reconnect MySQL database: {e}. Attempting clean reconnection...")
+                try:
+                    try:
+                        self.conn.close()
+                    except Exception:
+                        pass
+                    import pymysql
+                    if self.conn_args:
+                        conn_kwargs = dict(self.conn_args)
+                        conn_kwargs.setdefault("autocommit", True)
+                        self.conn = pymysql.connect(**conn_kwargs)
+                    else:
+                        self.conn.connect()
+                    print("Successfully re-established clean MySQL connection!")
+                except Exception as conn_err:
+                    print(f"Failed to force clean MySQL connection: {conn_err}")
+                    raise conn_err
+
+        def setup(self, *args, **kwargs):
+            with self.lock:
+                self._ping_unlocked()
+                return super().setup(*args, **kwargs)
+
+        def get_tuple(self, *args, **kwargs):
+            with self.lock:
+                self._ping_unlocked()
+                return super().get_tuple(*args, **kwargs)
+
+        def list(self, *args, **kwargs):
+            with self.lock:
+                self._ping_unlocked()
+                return list(super().list(*args, **kwargs))
+
+        def put(self, *args, **kwargs):
+            with self.lock:
+                self._ping_unlocked()
+                return super().put(*args, **kwargs)
+
+        def put_writes(self, *args, **kwargs):
+            with self.lock:
+                self._ping_unlocked()
+                return super().put_writes(*args, **kwargs)
+
+        async def aget_tuple(self, config: RunnableConfig):
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, self.get_tuple, config)
+
+        async def aput(self, config: RunnableConfig, checkpoint, metadata, new_versions):
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, self.put, config, checkpoint, metadata, new_versions)
+
+        async def aput_writes(self, config: RunnableConfig, writes, task_id, task_path=""):
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, self.put_writes, config, writes, task_id, task_path)
+
+        async def alist(self, config: RunnableConfig | None, *, filter=None, before=None, limit=None):
+            loop = asyncio.get_running_loop()
+            def _sync_list():
+                return list(self.list(config, filter=filter, before=before, limit=limit))
+            items = await loop.run_in_executor(None, _sync_list)
+            for item in items:
+                yield item
+
+        @classmethod
+        @contextmanager
+        def from_conn_string(cls, conn_string: str):
+            import urllib.parse
+            import pymysql
+            
+            parsed = urllib.parse.urlparse(conn_string)
+            user = parsed.username
+            password = parsed.password
+            if password:
+                password = urllib.parse.unquote(password)
+            if user:
+                user = urllib.parse.unquote(user)
+            database = parsed.path.lstrip('/')
+            if database:
+                database = urllib.parse.unquote(database)
+            
+            # Valid keyword arguments for pymysql.connect
+            valid_keys = {
+                "host", "port", "user", "password", "database", "charset",
+                "sql_mode", "read_default_file", "conv", "use_unicode",
+                "client_flag", "cursorclass", "ssl", "read_timeout",
+                "write_timeout", "connect_timeout", "autocommit", "ssl_disabled"
+            }
+
+            conn_args = {
+                "host": parsed.hostname or "localhost",
+                "port": parsed.port or 3306,
+                "user": user,
+                "password": password or "",
+                "database": database,
+                "connect_timeout": 5,
+                "read_timeout": 15,
+                "write_timeout": 15,
+                "ssl_disabled": True,
+                "autocommit": True,
+                "init_command": "SET SESSION lock_wait_timeout = 5"
+            }
+
+            if parsed.query:
+                params = urllib.parse.parse_qs(parsed.query)
+                for k, v in params.items():
+                    k_lower = k.lower()
+                    if k_lower in valid_keys and k_lower != "init_command":
+                        val = v[0]
+                        if val.lower() == "true":
+                            val = True
+                        elif val.lower() == "false":
+                            val = False
+                        elif val.isdigit():
+                            val = int(val)
+                        conn_args[k_lower] = val
+            
+            print(f"[MySQL] Connecting to MySQL checkpointer at {conn_args['host']}:{conn_args['port']}/{database} (timeout: 5s)...", flush=True)
+            conn = pymysql.connect(**conn_args)
+            try:
+                saver = cls(conn=conn, serde=None, conn_args=conn_args)
+                yield saver
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+except ImportError:
+    ReconnectingPyMySQLSaver = None
+
+
+# ── Global state and Lifespan ──────────────────────────────────────────
+
+# Global toolkit and compiled langgraph app instances
+toolkit: WrenToolkit | None = None
+langgraph_app = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifecycle context manager to initialize the Wren Toolkit, MCP sessions, and checkpointer at startup."""
+    global toolkit, langgraph_app, mcp_sessions, global_mcp_tools, mcp_retry_task, mcp_manager_task, mysql_exit_stack
+    
+    print("[LIFESPAN] Starting dual-track server lifespan initialization...", flush=True)
+
+    # Start persistent MCP manager task
+    mcp_manager_task = asyncio.create_task(mcp_manager_worker())
+    
+    # 1. Initialize Wren Toolkit
+    project_path = os.environ.get("PROJECT_PATH")
+    if project_path:
+        project_path = project_path.strip().strip('"').strip("'")
+        try:
+            print(f"[LIFESPAN] Initializing WrenToolkit from project: {project_path}...", flush=True)
+            # Run in worker thread to prevent blocking Uvicorn startup loop
+            toolkit = await asyncio.to_thread(WrenToolkit.from_project, project_path)
+            print("[LIFESPAN] Successfully initialized WrenToolkit!", flush=True)
+        except Exception as e:
+            print(f"[LIFESPAN Warning] Error initializing WrenToolkit during lifespan startup: {e}. Will lazy-initialize on first request.", flush=True)
+
+    if not os.environ.get("OPENAI_API_KEY"):
+        print("[LIFESPAN Warning] OPENAI_API_KEY is not set. Custom endpoint configuration or key will be required.", flush=True)
+
+    # 2. Initialize MCP Sessions
+    mcp_config_dir = os.environ.get("MCP_CONFIG_DIR")
+    if mcp_config_dir:
+        mcp_config_dir = mcp_config_dir.strip().strip('"').strip("'")
+        mcp_configs = load_mcp_configs(mcp_config_dir)
+        if mcp_configs:
+            print(f"Loaded {len(mcp_configs)} MCP server configs: {list(mcp_configs.keys())}")
+            mcp_configs_registry.update(mcp_configs)
+            try:
+                from mcp import ClientSession
+                
+                for server_name in mcp_configs.keys():
+                    try:
+                        async def _connect_server():
+                            session = await get_or_create_mcp_session(server_name)
+                            tools_result = await session.list_tools()
+                            print(f"Discovered {len(tools_result.tools)} tools from MCP server '{server_name}': {[t.name for t in tools_result.tools]}")
+                            
+                            for mcp_tool in tools_result.tools:
+                                lc_tool = convert_mcp_to_langchain(server_name, mcp_tool)
+                                global_mcp_tools.append(lc_tool)
+                            initialized_mcp_servers.add(server_name)
+
+                        await asyncio.wait_for(_connect_server(), timeout=15.0)
+                    except asyncio.TimeoutError:
+                        print(f"Failed to connect to MCP server '{server_name}': Connection or initialization timed out after 15.0 seconds.")
+                    except Exception as e:
+                        print(f"Failed to connect to MCP server '{server_name}': {e}")
+                
+                # Start background reconnect task for failed servers
+                failed_servers = set(mcp_configs.keys()) - initialized_mcp_servers
+                if failed_servers:
+                    global mcp_retry_task
+                    print(f"Starting background reconnect task for failed MCP servers: {list(failed_servers)}")
+                    mcp_retry_task = asyncio.create_task(retry_failed_mcp_connections_loop())
+            except ImportError:
+                print("Warning: 'mcp' package is not installed. Skipping MCP initialization.")
+
+    # 3. Determine Checkpointer
+    db_uri = os.environ.get("CHAT_HISTORY_DB_URI")
+    if db_uri:
+        db_uri = db_uri.strip().strip('"').strip("'")
+        
+    if db_uri and sys.platform.startswith("win") and "localhost" in db_uri:
+        try:
+            from urllib.parse import urlparse, urlunparse
+            parsed = urlparse(db_uri)
+            if parsed.hostname == "localhost":
+                netloc = parsed.netloc
+                if "@" in netloc:
+                    user_pass, host_port = netloc.rsplit("@", 1)
+                    if host_port.startswith("localhost:"):
+                        host_port = "127.0.0.1" + host_port[len("localhost"):]
+                    elif host_port == "localhost":
+                        host_port = "127.0.0.1"
+                    new_netloc = f"{user_pass}@{host_port}"
+                else:
+                    if netloc.startswith("localhost:"):
+                        new_netloc = "127.0.0.1" + netloc[len("localhost"):]
+                    elif netloc == "localhost":
+                        new_netloc = "127.0.0.1"
+                parsed = parsed._replace(netloc=new_netloc)
+                db_uri = urlunparse(parsed)
+                print(f"Auto-resolved 'localhost' to '127.0.0.1' in database URI for Windows compatibility.")
+        except Exception as e:
+            print(f"Warning: Failed to auto-resolve localhost in CHAT_HISTORY_URI: {e}")
+
+    checkpointer = None
+    
+    if db_uri and toolkit and ReconnectingPyMySQLSaver:
         print("CHAT_HISTORY_DB_URI detected. Attempting to initialize MySQL checkpointer...")
         try:
-            from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
-            from contextlib import contextmanager
-
-            class ReconnectingPyMySQLSaver(PyMySQLSaver):
-                def __init__(self, *args, conn_args: dict = None, **kwargs):
-                    super().__init__(*args, **kwargs)
-                    self.conn_args = conn_args
-
-                def _ping_unlocked(self):
-                    try:
-                        if self.conn:
-                            self.conn.ping()
-                    except Exception as e:
-                        print(f"Failed to ping/reconnect MySQL database: {e}. Attempting clean reconnection...")
-                        try:
-                            try:
-                                self.conn.close()
-                            except Exception:
-                                pass
-                            import pymysql
-                            if self.conn_args:
-                                conn_kwargs = dict(self.conn_args)
-                                conn_kwargs.setdefault("autocommit", True)
-                                self.conn = pymysql.connect(**conn_kwargs)
-                            else:
-                                self.conn.connect()
-                            print("Successfully re-established clean MySQL connection!")
-                        except Exception as conn_err:
-                            print(f"Failed to force clean MySQL connection: {conn_err}")
-                            raise conn_err
-
-                def setup(self, *args, **kwargs):
-                    with self.lock:
-                        self._ping_unlocked()
-                        return super().setup(*args, **kwargs)
-
-                def get_tuple(self, *args, **kwargs):
-                    with self.lock:
-                        self._ping_unlocked()
-                        return super().get_tuple(*args, **kwargs)
-
-                def list(self, *args, **kwargs):
-                    with self.lock:
-                        self._ping_unlocked()
-                        return list(super().list(*args, **kwargs))
-
-                def put(self, *args, **kwargs):
-                    with self.lock:
-                        self._ping_unlocked()
-                        return super().put(*args, **kwargs)
-
-                def put_writes(self, *args, **kwargs):
-                    with self.lock:
-                        self._ping_unlocked()
-                        return super().put_writes(*args, **kwargs)
-
-                async def aget_tuple(self, config: RunnableConfig):
-                    import asyncio
-                    loop = asyncio.get_running_loop()
-                    return await loop.run_in_executor(None, self.get_tuple, config)
-
-                async def aput(self, config: RunnableConfig, checkpoint, metadata, new_versions):
-                    import asyncio
-                    loop = asyncio.get_running_loop()
-                    return await loop.run_in_executor(None, self.put, config, checkpoint, metadata, new_versions)
-
-                async def aput_writes(self, config: RunnableConfig, writes, task_id, task_path=""):
-                    import asyncio
-                    loop = asyncio.get_running_loop()
-                    return await loop.run_in_executor(None, self.put_writes, config, writes, task_id, task_path)
-
-                async def alist(self, config: RunnableConfig | None, *, filter=None, before=None, limit=None):
-                    import asyncio
-                    loop = asyncio.get_running_loop()
-                    def _sync_list():
-                        return list(self.list(config, filter=filter, before=before, limit=limit))
-                    items = await loop.run_in_executor(None, _sync_list)
-                    for item in items:
-                        yield item
-
-                @classmethod
-                @contextmanager
-                def from_conn_string(cls, conn_string: str):
-                    import urllib.parse
-                    import pymysql
-                    
-                    parsed = urllib.parse.urlparse(conn_string)
-                    user = parsed.username
-                    password = parsed.password
-                    if password:
-                        password = urllib.parse.unquote(password)
-                    if user:
-                        user = urllib.parse.unquote(user)
-                    database = parsed.path.lstrip('/')
-                    if database:
-                        database = urllib.parse.unquote(database)
-                    
-                    # Valid keyword arguments for pymysql.connect
-                    valid_keys = {
-                        "host", "port", "user", "password", "database", "charset",
-                        "sql_mode", "read_default_file", "conv", "use_unicode",
-                        "client_flag", "cursorclass", "ssl", "read_timeout",
-                        "write_timeout", "connect_timeout", "autocommit", "ssl_disabled"
-                    }
-
-                    conn_args = {
-                        "host": parsed.hostname or "localhost",
-                        "port": parsed.port or 3306,
-                        "user": user,
-                        "password": password or "",
-                        "database": database,
-                        "connect_timeout": 5, # 5s timeout to prevent indefinite socket hangs
-                        "read_timeout": 15,
-                        "write_timeout": 15,
-                        "ssl_disabled": True,
-                        "autocommit": True,
-                        "init_command": "SET SESSION lock_wait_timeout = 5" # 5s DDL lock timeout to prevent infinite Waiting for metadata lock
-                    }
-
-                    if parsed.query:
-                        params = urllib.parse.parse_qs(parsed.query)
-                        for k, v in params.items():
-                            k_lower = k.lower()
-                            if k_lower in valid_keys and k_lower != "init_command":
-                                val = v[0]
-                                if val.lower() == "true":
-                                    val = True
-                                elif val.lower() == "false":
-                                    val = False
-                                elif val.isdigit():
-                                    val = int(val)
-                                conn_args[k_lower] = val
-                    
-                    print(f"[MySQL] Connecting to MySQL checkpointer at {conn_args['host']}:{conn_args['port']}/{database} (timeout: 5s)...", flush=True)
-                    conn = pymysql.connect(**conn_args)
-                    try:
-                        saver = cls(conn=conn, serde=None, conn_args=conn_args)
-                        yield saver
-                    finally:
-                        try:
-                            conn.close()
-                        except Exception:
-                            pass
-
             if "autocommit" not in db_uri.lower():
                 separator = "&" if "?" in db_uri else "?"
                 db_uri = f"{db_uri}{separator}autocommit=true"
@@ -804,9 +910,6 @@ async def lifespan(app: FastAPI):
             except Exception as setup_err:
                 print(f"[MySQL Warning] Checkpointer table setup error: {setup_err}. Falling back to in-memory MemorySaver for Q&A reliability.", flush=True)
                 checkpointer = None
-        except ImportError:
-            print("\nWARNING: 'langgraph-checkpoint-mysql' or 'pymysql' is not installed.")
-            print("Falling back to in-memory MemorySaver...")
         except Exception as e:
             print(f"\n[MySQL Error] Failed to initialize MySQL checkpointer: {e}", flush=True)
             print("Falling back to in-memory MemorySaver...", flush=True)
@@ -1372,18 +1475,22 @@ def lazy_init_app(model_name: str = "gpt-4o"):
         # Check if DB URI is set to use MySQL checkpointer even during lazy load
         db_uri = os.environ.get("CHAT_HISTORY_DB_URI")
         checkpointer = None
-        if db_uri:
+        if db_uri and ReconnectingPyMySQLSaver:
             db_uri = db_uri.strip().strip('"').strip("'")
             if "autocommit" not in db_uri.lower():
                 separator = "&" if "?" in db_uri else "?"
                 db_uri = f"{db_uri}{separator}autocommit=true"
             try:
-                from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
                 checkpointer = mysql_exit_stack.enter_context(ReconnectingPyMySQLSaver.from_conn_string(db_uri))
-                checkpointer.setup()
-                print("Lazy-initialized persistent MySQL checkpointer!")
+                try:
+                    checkpointer.setup()
+                    print("Lazy-initialized persistent MySQL checkpointer!")
+                except Exception as setup_err:
+                    print(f"Warning during lazy MySQL checkpointer setup: {setup_err}. Falling back to MemorySaver for reliability.")
+                    checkpointer = None
             except Exception as db_err:
                 print(f"Failed to lazy-initialize MySQL checkpointer: {db_err}. Falling back to MemorySaver...")
+                checkpointer = None
                 
         if not checkpointer:
             print("Using in-memory MemorySaver (data will clear on server reload) for lazy init.")
