@@ -14,8 +14,8 @@ services:
       - MCP_HOST=0.0.0.0
       - MCP_PORT=8202
 
-      # PIP Index Mirror
-      - PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+      # PIP Index Mirror (USTC 中科大镜像源)
+      - PIP_INDEX_URL=https://mirrors.ustc.edu.cn/pypi/web/simple
 
       # OpenAI API config Embedded Model (or general OpenAI-compatible endpoints)
       - WREN_EMBEDDING_PROVIDER=openai

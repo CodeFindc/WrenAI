@@ -40,21 +40,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy pre-built frontend and code from stage 1
 COPY --from=frontend-builder /app /app
 
-# Configure PIP to use Tsinghua & Aliyun mirrors
-ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
-ENV PIP_EXTRA_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+# Configure PIP to use USTC mirror (中科大镜像源)
+ENV PIP_INDEX_URL=https://mirrors.ustc.edu.cn/pypi/web/simple
+ENV PIP_EXTRA_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 
-# Install core/wren package via Tsinghua PyPI mirror
-RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -e /app/core/wren[all] 
+# Install core/wren package via USTC PyPI mirror
+RUN pip install --no-cache-dir -i https://mirrors.ustc.edu.cn/pypi/web/simple -e /app/core/wren[all] 
 
 # Install wren-langchain package
 WORKDIR /app/sdk/wren-langchain
 RUN sed -i 's/wren-engine/wrenai/g' pyproject.toml && \
-    pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -e .[all]
+    pip install --no-cache-dir -i https://mirrors.ustc.edu.cn/pypi/web/simple -e .[all]
 
 # Install additional requirements
 WORKDIR /app/sdk/wren-langchain/examples
-RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
+RUN pip install --no-cache-dir -i https://mirrors.ustc.edu.cn/pypi/web/simple -r requirements.txt
 
 # Ensure entrypoint.sh is executable
 RUN chmod +x entrypoint.sh 
