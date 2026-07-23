@@ -946,7 +946,7 @@ def get_local_or_cdn(filename: str, cdn_url: str, media_type: str) -> Response:
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def serve_chat_ui():
-    """Serve the compiled single-file offline chat UI at the root path."""
+    """Serve the compiled frontend chat UI or an interactive status dashboard at the root path."""
     dist_html_path = os.path.join(
         os.path.dirname(__file__), 
         "wren-chat-ui", 
@@ -958,15 +958,60 @@ def serve_chat_ui():
             with open(dist_html_path, "r", encoding="utf-8") as f:
                 return HTMLResponse(content=f.read())
         except Exception as e:
-            return HTMLResponse(content=f"<h3>Error reading built HTML: {e}</h3>", status_code=500)
-    return HTMLResponse(
-        content=(
-            "<h3>Wren Chat UI is not compiled yet.</h3>"
-            "<p>Please build the UI first by running: <code>cmd /c npm run build</code> "
-            "inside the <code>examples/wren-chat-ui/</code> directory.</p>"
-        ),
-        status_code=404
-    )
+            pass
+            
+    dashboard_html = f"""
+    <!DOCTYPE html>
+    <html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>WrenAI Dual-Track Agent Platform</title>
+        <style>
+            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 40px; display: flex; justify-content: center; }}
+            .card {{ background: #1e293b; border: 1px solid #334155; border-radius: 16px; padding: 32px; max-width: 720px; width: 100%; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3); }}
+            h1 {{ color: #38bdf8; margin-top: 0; display: flex; align-items: center; gap: 12px; font-size: 24px; }}
+            .status-badge {{ background: #166534; color: #4ade80; padding: 4px 12px; border-radius: 9999px; font-size: 12px; font-weight: 600; text-transform: uppercase; }}
+            p {{ color: #94a3b8; line-height: 1.6; }}
+            .endpoint-group {{ margin-top: 24px; background: #0f172a; border-radius: 8px; padding: 16px; border: 1px solid #1e293b; }}
+            .endpoint-title {{ font-size: 14px; font-weight: 600; color: #cbd5e1; margin-bottom: 8px; }}
+            .url-box {{ background: #1e293b; padding: 8px 12px; border-radius: 6px; font-family: monospace; color: #a5f3fc; font-size: 13px; word-break: break-all; margin-bottom: 8px; display: block; }}
+            a {{ color: #38bdf8; text-decoration: none; font-weight: 500; }}
+            a:hover {{ text-decoration: underline; }}
+            .tag {{ background: #334155; color: #e2e8f0; font-size: 11px; padding: 2px 8px; border-radius: 4px; font-family: monospace; }}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h1>WrenAI Service Active <span class="status-badge">Running</span></h1>
+            <p>WrenAI 语义数据层 Agent 服务已成功启动在端口 <code>8201</code>，已原生支持 DEEIX-Chat / OpenAI 标准协议及 MCP 双轨接入。</p>
+            
+            <div class="endpoint-group">
+                <div class="endpoint-title">🚀 路径 B：OpenAI 标准协议端点 (DEEIX-Chat 自定义 Provider)</div>
+                <span class="url-box">POST http://&lt;host&gt;:8201/v1/chat/completions</span>
+                <span class="url-box">GET  http://&lt;host&gt;:8201/v1/models</span>
+                <p style="font-size: 12px; margin: 4px 0 0 0;">在 DEEIX-Chat 后台填入 Base URL <code>http://&lt;host&gt;:8201/v1</code> 即可直接对话。</p>
+            </div>
+
+            <div class="endpoint-group">
+                <div class="endpoint-title">🔌 路径 A：FastMCP SSE 插件端点</div>
+                <span class="url-box">http://&lt;host&gt;:8202/sse</span>
+                <p style="font-size: 12px; margin: 4px 0 0 0;">在 DEEIX-Chat 后台 MCP 插件管理添加 URL 即可使用 Wren 工具链。</p>
+            </div>
+
+            <div class="endpoint-group">
+                <div class="endpoint-title">🛠️ 常用开发与测试入口</div>
+                <ul style="padding-left: 20px; margin: 8px 0; color: #cbd5e1;">
+                    <li><a href="/docs" target="_blank">Swagger API 在线测试文档 (/docs)</a></li>
+                    <li><a href="/health" target="_blank">服务健康状态监控 (/health)</a></li>
+                    <li><a href="/v1/models" target="_blank">模型发现列表 (/v1/models)</a></li>
+                </ul>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=dashboard_html, status_code=200)
 
 
 @app.get("/docs", include_in_schema=False)
