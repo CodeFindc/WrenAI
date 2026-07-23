@@ -799,9 +799,11 @@ async def lifespan(app: FastAPI):
                 await asyncio.wait_for(asyncio.to_thread(checkpointer.setup), timeout=10.0)
                 print("[MySQL] Successfully initialized persistent MySQL checkpointer with auto-reconnection!", flush=True)
             except asyncio.TimeoutError:
-                print("[MySQL Warning] Checkpointer table setup timed out after 10s (possible MySQL metadata lock). Proceeding with initialized checkpointer.", flush=True)
+                print("[MySQL Warning] Checkpointer table setup timed out after 10s (possible MySQL metadata lock). Falling back to in-memory MemorySaver for Q&A reliability.", flush=True)
+                checkpointer = None
             except Exception as setup_err:
-                print(f"[MySQL Warning] Checkpointer table setup warning: {setup_err}. Proceeding with initialized checkpointer.", flush=True)
+                print(f"[MySQL Warning] Checkpointer table setup error: {setup_err}. Falling back to in-memory MemorySaver for Q&A reliability.", flush=True)
+                checkpointer = None
         except ImportError:
             print("\nWARNING: 'langgraph-checkpoint-mysql' or 'pymysql' is not installed.")
             print("Falling back to in-memory MemorySaver...")
@@ -810,10 +812,9 @@ async def lifespan(app: FastAPI):
             print("Falling back to in-memory MemorySaver...", flush=True)
 
     if not checkpointer:
-        if toolkit:
-            print("Using in-memory MemorySaver (data will clear on server reload).")
-            from langgraph.checkpoint.memory import MemorySaver
-            checkpointer = MemorySaver()
+        print("Using in-memory MemorySaver (data will clear on server reload).", flush=True)
+        from langgraph.checkpoint.memory import MemorySaver
+        checkpointer = MemorySaver()
 
     # Build LangGraph app
     if toolkit and checkpointer:
@@ -1212,8 +1213,15 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest, http_req
             )
             final_content = ""
             if "messages" in final_state and final_state["messages"]:
-                last_msg = final_state["messages"][-1]
-                final_content = getattr(last_msg, "content", str(last_msg))
+                # Try finding the last non-empty content from AIMessage or ToolMessage
+                for m in reversed(final_state["messages"]):
+                    content = getattr(m, "content", "")
+                    if content and isinstance(content, str) and content.strip():
+                        final_content = content.strip()
+                        break
+            
+            if not final_content:
+                final_content = "服务已收到您的消息。目前数据库或工具链尚无返回结果，请检查目标数据库连接及配置文件。"
 
             return {
                 "id": completion_id,
@@ -1243,7 +1251,6 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest, http_req
 
     # Streaming mode (SSE)
     async def event_stream_generator():
-        # Initial chunk specifying role
         initial_chunk = {
             "id": completion_id,
             "object": "chat.completion.chunk",
@@ -1259,6 +1266,9 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest, http_req
         }
         yield f"data: {json.dumps(initial_chunk, ensure_ascii=False)}\n\n"
 
+        yielded_any_content = False
+        fallback_tool_content = ""
+
         try:
             async for event in langgraph_app.astream(
                 graph_input,
@@ -1268,21 +1278,45 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest, http_req
                 for node_name, update in event.items():
                     msgs = update.get("messages", [])
                     for msg in msgs:
-                        if isinstance(msg, AIMessage) and msg.content:
-                            delta_chunk = {
-                                "id": completion_id,
-                                "object": "chat.completion.chunk",
-                                "created": created_ts,
-                                "model": request.model,
-                                "choices": [
-                                    {
-                                        "index": 0,
-                                        "delta": {"content": msg.content},
-                                        "finish_reason": None
-                                    }
-                                ]
-                            }
-                            yield f"data: {json.dumps(delta_chunk, ensure_ascii=False)}\n\n"
+                        content = getattr(msg, "content", "")
+                        if content and isinstance(content, str) and content.strip():
+                            if isinstance(msg, ToolMessage):
+                                fallback_tool_content = content.strip()
+                            elif isinstance(msg, AIMessage):
+                                delta_chunk = {
+                                    "id": completion_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created_ts,
+                                    "model": request.model,
+                                    "choices": [
+                                        {
+                                            "index": 0,
+                                            "delta": {"content": content},
+                                            "finish_reason": None
+                                        }
+                                    ]
+                                }
+                                yield f"data: {json.dumps(delta_chunk, ensure_ascii=False)}\n\n"
+                                yielded_any_content = True
+
+            # If model triggered tools but didn't generate final AIMessage text, yield tool content or fallback notice
+            if not yielded_any_content:
+                out_text = fallback_tool_content or "服务已成功接收您的问答。由于目标数据库或大模型工具未返回文本内容，请确认数据库状态。"
+                fallback_chunk = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_ts,
+                    "model": request.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": out_text},
+                            "finish_reason": None
+                        }
+                    ]
+                }
+                yield f"data: {json.dumps(fallback_chunk, ensure_ascii=False)}\n\n"
+
         except Exception as err:
             err_chunk = {
                 "id": completion_id,
@@ -1292,7 +1326,7 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest, http_req
                 "choices": [
                     {
                         "index": 0,
-                        "delta": {"content": f"\n[Error: {err}]"},
+                        "delta": {"content": f"\n[执行异常: {err}]"},
                         "finish_reason": None
                     }
                 ]
