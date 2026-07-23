@@ -1,151 +1,159 @@
-# Wren LangGraph Stateful API Server & Examples
+# Wren LangGraph Stateful API Server & Dual-Track Integration
 
-This directory contains production-ready examples demonstrating how to wrap a Wren AI semantic layer project inside a **stateful, multi-turn LangGraph Agent API Server** using FastAPI.
+This directory contains production-ready code demonstrating how to wrap a Wren AI semantic layer project inside a **stateful, multi-turn LangGraph Agent API Server** (with OpenAI compatibility) and a **FastMCP SSE Server** for seamless integration with AI platforms like **DEEIX-Chat**.
+
+---
+
+## Architecture Overview (Dual-Track Mode)
+
+```
+                            ┌────────────────────────────────────────┐
+                            │           DEEIX-Chat Platform          │
+                            │  (Web UI / Billing / Auth / Routing)   │
+                            └──────────────────┬─────────────────────┘
+                                               │
+                      ┌────────────────────────┴────────────────────────┐
+                      ▼                                                 ▼
+        【Track A: MCP Plugin Protocol】                    【Track B: OpenAI API Adapter Protocol】
+       DEEIX-Chat / Client as MCP Client                  DEEIX-Chat / Client as Upstream Client
+  (Any LLM calls Wren Semantic Tools over MCP)           (Select "wren-agent" from model list)
+                      │                                                 │
+                      ▼ (Port 8202 - FastMCP SSE)                       ▼ (Port 8201 - OpenAI /v1 Protocol)
+        ┌────────────────────────┐                        ┌────────────────────────┐
+        │   wren_mcp_server.py   │                        │langgraph_fastapi_multi │
+        │  (FastMCP SSE Server)  │                        │ (/v1/chat/completions) │
+        └───────────┬────────────┘                        └───────────┬────────────┘
+                    │                                                 │
+                    └────────────────────────┬────────────────────────┘
+                                             ▼
+                            ┌────────────────────────────────────────┐
+                            │         WrenAI Semantic Layer          │
+                            │    (WrenToolkit / LangGraph Agent)     │
+                            └────────────────────────────────────────┘
+```
 
 ---
 
 ## Features
 
-1. **Stateful Session Chat**: Preserves conversation history between turns using LangGraph checkpointers.
-2. **Streaming Updates**: Standard SSE/NDJSON stream endpoint `/chat/stream` for real-time node-by-node updates.
-3. **Adaptive Checkpointer**: Falls back to in-memory `MemorySaver` but automatically upgrades to persistent `MySQL` database storage if `CHAT_HISTORY_DB_URI` is provided.
-4. **Offline-Ready Swagger UI**: Caches Swagger JS/CSS assets locally for air-gapped development.
-5. **MCP Tool Extensions**: Dynamically loads external Model Context Protocol (MCP) servers (both local subprocesses via `stdio` and remote services via `sse`) from a directory specified by `MCP_CONFIG_DIR`.
+1. **Track A: FastMCP SSE Server (Port 8202)**:
+   - Exposes Wren AI semantic layer abilities (`wren_semantic_query`, `wren_get_system_prompt`, `wren_list_tools`) over Model Context Protocol (MCP) using SSE transport.
+   - Allows platform LLMs (GPT-4o, Claude 3.5, DeepSeek, etc.) to autonomously trigger NL2SQL and semantic data queries.
+
+2. **Track B: OpenAI API Compatible Adapter (Port 8201)**:
+   - Provides `/v1/models` and `/v1/chat/completions` endpoints supporting both non-streaming JSON responses and SSE streaming (`stream=true`).
+   - Automatically translates LangGraph node execution steps into standard OpenAI SSE delta chunks (`chat.completion.chunk`).
+
+3. **Stateful Session Chat**:
+   - Preserves multi-turn conversation history using LangGraph checkpointers (`MemorySaver` or MySQL database checkpointer via `CHAT_HISTORY_DB_URI`).
+
+4. **MCP Client Extension**:
+   - Dynamically loads external Model Context Protocol (MCP) servers (stdio / streamable_http / SSE) configured via `MCP_CONFIG_DIR`.
+
+5. **Container & Dual Service Management**:
+   - Out-of-the-box `docker-compose.yaml`, `Dockerfile`, and `start_dual_services.py` for launching both Track A and Track B concurrently.
 
 ---
 
-## Installation & Setup
+## Environment Variables
 
-Install the required packages:
+Configure the services via environment variables:
+
+| Variable | Description | Default / Example |
+|---|---|---|
+| `PROJECT_PATH` | Path to the prepared Wren project directory (holding `.wren`). | `/project` or `./wren_project` |
+| `PORT` | Port for Track B FastAPI / OpenAI Proxy server. | `8201` |
+| `MCP_HOST` | Host binding for Track A FastMCP SSE server. | `0.0.0.0` |
+| `MCP_PORT` | Port for Track A FastMCP SSE server. | `8202` |
+| `OPENAI_API_KEY` | API Key for upstream LLM used by LangGraph. | `sk-proj-...` |
+| `LLM_API_BASE` | Custom base URL for LLM service (e.g., vLLM, Ollama, OneAPI). | `http://localhost:8000/v1` |
+| `LLM_MODEL_NAME` | Model name override. | `gpt-4o` |
+| `CHAT_HISTORY_DB_URI` | Optional MySQL connection string for thread checkpointer. | `mysql+pymysql://user:pass@localhost:3306/db` |
+| `MCP_CONFIG_DIR` | Optional directory containing external MCP JSON configs. | `./mcp_configs` |
+
+---
+
+## Running the Dual-Track Services
+
+### Option 1: Docker Compose (Recommended for Production)
+
+Run both Track A and Track B in containerized mode:
 
 ```bash
-pip install -r requirements.txt
+docker-compose up -d --build
 ```
 
----
+- **Track B (OpenAI Proxy & API)**: `http://localhost:8201/v1`
+- **Track A (FastMCP SSE Server)**: `http://localhost:8202/sse`
 
-## Configuration (Environment Variables)
+### Option 2: Windows Batch Script (Local Development)
 
-The server is configured via environment variables:
-
-| Variable | Description | Example |
-|---|---|---|
-| `PROJECT_PATH` | Path to the prepared Wren project directory (holding `.wren`). | `/path/to/my-wren-project` |
-| `OPENAI_API_KEY` | API Key for LLM. | `sk-proj-...` |
-| `LLM_API_BASE` | Optional custom base URL (e.g. for vLLM, Ollama, OneAPI). | `https://api.openai.com/v1` |
-| `LLM_MODEL_NAME` | Model to override default `gpt-4o`. | `gpt-4o-mini` |
-| `CHAT_HISTORY_DB_URI` | Optional MySQL connection string for persistent thread saving. | `mysql+pymysql://user:pass@localhost:3306/db` |
-| `MCP_CONFIG_DIR` | Optional directory to load `.json` MCP server configurations from. | `./mcp_configs` |
-| `PORT` | Port number to run the FastAPI server on. | `8201` |
-
----
-
-## Model Context Protocol (MCP) Tool Integration
-
-You can extend the agent's capabilities beyond Wren query/memory tools by attaching external MCP servers. The server automatically scans `MCP_CONFIG_DIR` for `.json` files containing server setups (compatible with Claude Desktop configuration format).
-
-### Configuration Formats
-
-Create a JSON file (e.g., `mcp_config.json`) inside your config directory.
-
-#### 1. Local Stdio Servers (Subprocess)
-Runs a command locally inside a subprocess to interface with tools (e.g., SQLite, Filesystem, Git):
-```json
-{
-  "mcpServers": {
-    "git": {
-      "command": "uvx",
-      "args": ["mcp-server-git", "--repository", "/path/to/my/repo"]
-    },
-    "fetch": {
-      "command": "uv",
-      "args": ["run", "mcp-server-fetch"]
-    }
-  }
-}
+```cmd
+start_server.bat
 ```
 
-#### 2. Remote Servers (Streamable HTTP / SSE)
-Connects to a running remote MCP server over the network. The server automatically infers the transport type from the URL (e.g. `streamable_http` if URL contains `/mcp`, or `sse` otherwise), but you can also configure it explicitly with the `"type"` field:
+### Option 3: Python Launcher
 
-##### Streamable HTTP (Recommended)
-```json
-{
-  "mcpServers": {
-    "my-remote-agent": {
-      "url": "http://192.168.110.9:8001/mcp",
-      "type": "streamable_http",
-      "headers": {
-        "Authorization": "Bearer token"
-      }
-    }
-  }
-}
+```bash
+python start_dual_services.py
 ```
-
-##### SSE (Server-Sent Events)
-```json
-{
-  "mcpServers": {
-    "my-remote-agent": {
-      "url": "http://localhost:8080/sse",
-      "type": "sse"
-    }
-  }
-}
-```
-
-
-### How it Works
-1. At startup, the server uses `contextlib.AsyncExitStack` to establish connections to all declared MCP channels.
-2. It fetches available tool lists from each server.
-3. It maps each tool's JSON Schema to a Pydantic Model to feed the LangChain compiler.
-4. When the agent decides to invoke an MCP tool, the server runs it on the respective session thread.
-5. All connections are cleanly closed when the FastAPI server shuts down.
-
----
-
-## Running the Server
-
-1. Define your environment variables (e.g., via a `.env` file or terminal):
-   ```bash
-   export PROJECT_PATH="/absolute/path/to/wren-project"
-   export OPENAI_API_KEY="sk-..."
-   export MCP_CONFIG_DIR="./mcp_configs"
-   ```
-2. Run the script:
-   ```bash
-   python langgraph_fastapi_multi.py
-   ```
-   Or using Uvicorn:
-   ```bash
-   uvicorn langgraph_fastapi_multi:app --host 0.0.0.0 --port 8201
-   ```
 
 ---
 
 ## API Endpoints & Usage
 
-Once started, visit **`http://localhost:8201/docs`** to inspect the API via Swagger UI.
+### Track A: FastMCP SSE Endpoint (`http://localhost:8202/sse`)
 
-### 1. Chat Endpoint (`POST /chat`)
-Ask a question under a specific session:
+Test SSE connection:
 ```bash
-curl -X POST http://localhost:8201/chat \
+curl -N http://localhost:8202/sse
+```
+
+Available Tools in FastMCP:
+- `wren_semantic_query(question: str)`: Executes natural language query against semantic layer.
+- `wren_get_system_prompt()`: Returns system prompt instructions & schema definition.
+- `wren_list_tools()`: Lists sub-tools and internal schemas.
+
+---
+
+### Track B: OpenAI API Adapter (`http://localhost:8201/v1`)
+
+#### 1. Models Discovery (`GET /v1/models`)
+```bash
+curl http://localhost:8201/v1/models
+```
+
+#### 2. Chat Completions - Non-Streaming (`POST /v1/chat/completions`)
+```bash
+curl -X POST http://localhost:8201/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"question": "How many records are in our customers table?", "session_id": "session-123"}'
+  -d '{
+    "model": "wren-agent",
+    "messages": [
+      {"role": "user", "content": "How many records are in our database?"}
+    ],
+    "stream": false
+  }'
 ```
 
-### 2. Streaming Chat Endpoint (`POST /chat/stream`)
-Receive NDJSON stream events as the LangGraph agent executes nodes (Agent reasoning -> Tool executing -> Agent deciding):
+#### 3. Chat Completions - Streaming SSE (`POST /v1/chat/completions`)
 ```bash
-curl -X POST http://localhost:8201/chat/stream \
+curl -X POST http://localhost:8201/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"question": "Summarize user orders last month using our database", "session_id": "session-123"}'
+  -d '{
+    "model": "wren-agent",
+    "messages": [
+      {"role": "user", "content": "Summarize total customer orders for last month"}
+    ],
+    "stream": true
+  }'
 ```
 
-### 3. Session History (`GET /chat/history/{session_id}`)
-Retrieve the full transcript of a thread:
-```bash
-curl http://localhost:8201/chat/history/session-123
-```
+---
+
+### Legacy Endpoints
+
+- **Swagger UI**: `http://localhost:8201/docs`
+- **Native Chat API**: `POST /chat`
+- **Native Stream API**: `POST /chat/stream`
+- **History Retrieval**: `GET /chat/history/{session_id}`

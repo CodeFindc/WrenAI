@@ -376,15 +376,20 @@ if exist ".env" (
 set "PROJECT_PATH=%PROJECT_DIR%"
 echo.
 
-:: ── 10. Start FastAPI server ────────────────────────────────────────────────
-echo [10/10] Starting FastAPI server ...
+:: ── 10. Start Dual-Track Services ────────────────────────────────────────────
+echo [10/10] Starting Dual-Track WrenAI Services ...
 echo.
-echo      ^> http://0.0.0.0:8201
+echo      ^> Track A (FastMCP SSE): http://0.0.0.0:8202/sse
+echo      ^> Track B (OpenAI Proxy & API): http://0.0.0.0:8201/v1
 echo      ^> PROJECT_PATH=%PROJECT_DIR%
 echo.
 
 set "PROJECT_PATH=%PROJECT_DIR%"
 
+echo Starting Track A: FastMCP SSE Server (Port 8202) ...
+start "Wren FastMCP SSE Server" /B python wren_mcp_server.py
+
+echo Starting Track B: OpenAI API Adapter & FastAPI Server (Port 8201) ...
 python langgraph_fastapi_multi.py
 
 if %ERRORLEVEL% NEQ 0 (

@@ -49,11 +49,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Ensure entrypoint.sh is executable and has correct line endings
 RUN chmod +x entrypoint.sh 
 
-# Expose the API server port
-EXPOSE 8201
+# Expose the API server and MCP server ports
+EXPOSE 8201 8202
 
 # Use entrypoint.sh to initialize Wren profile/MDL/memory index
 ENTRYPOINT ["./entrypoint.sh"]
 
-# CMD command to start the stateful FastAPI server via python3 directly
-CMD ["python3", "langgraph_fastapi_multi.py"]
+# CMD command to start dual-track services (FastMCP SSE + FastAPI OpenAI Proxy)
+CMD ["python3", "start_dual_services.py"]
+

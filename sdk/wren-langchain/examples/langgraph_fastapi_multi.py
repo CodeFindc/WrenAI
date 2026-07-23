@@ -857,6 +857,24 @@ class ChatRequestMulti(BaseModel):
     )
 
 
+class OpenAIMessage(BaseModel):
+    role: str = Field(..., description="Role of the message: user, assistant, system, or tool")
+    content: str | list[dict[str, Any]] | None = Field(default="", description="Message content")
+    name: str | None = None
+    tool_call_id: str | None = None
+
+
+class OpenAIChatCompletionRequest(BaseModel):
+    model: str = Field(default="wren-agent", description="Model name requested")
+    messages: list[OpenAIMessage] = Field(..., description="Array of conversation messages")
+    stream: bool = Field(default=False, description="Whether to stream response chunks over SSE")
+    temperature: float | None = 0.7
+    top_p: float | None = 1.0
+    user: str | None = Field(default=None, description="Optional user/session identifier")
+
+
+
+
 # ── Helpers for message serialization ───────────────────────────────────
 
 def serialize_message(msg: BaseMessage) -> dict:
@@ -1003,6 +1021,173 @@ def health_check():
         "project_loaded": toolkit is not None,
         "memory_enabled": toolkit._memory.enabled if toolkit else False
     }
+
+
+@app.get("/v1/models")
+async def list_openai_models():
+    """OpenAI API compatible model discovery endpoint for DEEIX-Chat integration."""
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "wren-agent",
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "wrenai",
+                "permission": [],
+                "root": "wren-agent",
+                "parent": None
+            },
+            {
+                "id": "wren-semantic-analyst",
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "wrenai",
+                "permission": [],
+                "root": "wren-semantic-analyst",
+                "parent": None
+            }
+        ]
+    }
+
+
+@app.post("/v1/chat/completions")
+async def openai_chat_completions(request: OpenAIChatCompletionRequest):
+    """OpenAI API compatible chat completion endpoint supporting sync & SSE streaming."""
+    lazy_init_app(model_name=request.model)
+
+    # Extract user question from the last user message
+    question = ""
+    for msg in reversed(request.messages):
+        if msg.role == "user":
+            if isinstance(msg.content, str):
+                question = msg.content
+            elif isinstance(msg.content, list):
+                parts = [p.get("text", "") for p in msg.content if isinstance(p, dict) and p.get("type") == "text"]
+                question = " ".join(parts)
+            break
+
+    if not question:
+        question = "分析数据"
+
+    actual_session_id = request.user or str(uuid.uuid4())
+    config = {"configurable": {"thread_id": actual_session_id}}
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
+    created_ts = int(datetime.datetime.now().timestamp())
+
+    if not request.stream:
+        try:
+            final_state = await langgraph_app.ainvoke(
+                {"messages": [HumanMessage(content=question)]},
+                config=config
+            )
+            final_content = ""
+            if "messages" in final_state and final_state["messages"]:
+                last_msg = final_state["messages"][-1]
+                final_content = getattr(last_msg, "content", str(last_msg))
+
+            return {
+                "id": completion_id,
+                "object": "chat.completion",
+                "created": created_ts,
+                "model": request.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": final_content
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": len(question) // 4,
+                    "completion_tokens": len(final_content) // 4,
+                    "total_tokens": (len(question) + len(final_content)) // 4
+                }
+            }
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Execution error: {str(e)}")
+
+    # Streaming mode (SSE)
+    async def event_stream_generator():
+        # Initial chunk specifying role
+        initial_chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created_ts,
+            "model": request.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant"},
+                    "finish_reason": None
+                }
+            ]
+        }
+        yield f"data: {json.dumps(initial_chunk, ensure_ascii=False)}\n\n"
+
+        try:
+            async for event in langgraph_app.astream(
+                {"messages": [HumanMessage(content=question)]},
+                config=config,
+                stream_mode="updates"
+            ):
+                for node_name, update in event.items():
+                    msgs = update.get("messages", [])
+                    for msg in msgs:
+                        if isinstance(msg, AIMessage) and msg.content:
+                            delta_chunk = {
+                                "id": completion_id,
+                                "object": "chat.completion.chunk",
+                                "created": created_ts,
+                                "model": request.model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"content": msg.content},
+                                        "finish_reason": None
+                                    }
+                                ]
+                            }
+                            yield f"data: {json.dumps(delta_chunk, ensure_ascii=False)}\n\n"
+        except Exception as err:
+            err_chunk = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created_ts,
+                "model": request.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": f"\n[Error: {err}]"},
+                        "finish_reason": None
+                    }
+                ]
+            }
+            yield f"data: {json.dumps(err_chunk, ensure_ascii=False)}\n\n"
+
+        stop_chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created_ts,
+            "model": request.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop"
+                }
+            ]
+        }
+        yield f"data: {json.dumps(stop_chunk, ensure_ascii=False)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_stream_generator(), media_type="text/event-stream")
+
 
 
 def lazy_init_app(model_name: str = "gpt-4o"):

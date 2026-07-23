@@ -6,9 +6,15 @@ services:
       context: ../../../
       dockerfile: sdk/wren-langchain/examples/Dockerfile
     ports:
-      - "8201:8201"
+      - "8201:8201" # Track B: OpenAI API Adapter & Stateful FastAPI Server
+      - "8202:8202" # Track A: FastMCP SSE Server Adapter
     environment:
-      # OpenAI API config Embedded Model  (or general OpenAI-compatible endpoints)
+      # Dual-Track Server Ports
+      - PORT=8201
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8202
+
+      # OpenAI API config Embedded Model (or general OpenAI-compatible endpoints)
       - WREN_EMBEDDING_PROVIDER=openai
       - WREN_EMBEDDING_MODEL=${WREN_EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B}
       - EM_OPENAI_API_KEY=${EM_OPENAI_API_KEY:-sk-HDoRjhs3Z4WIeU1cYfho9jaNQWvye5lPWyY1YpEmmJpdrBjx}
@@ -45,3 +51,4 @@ services:
       # Mount host directory for project configs, models, target MDL and database profiles.
       - ./wren_project:/project
     restart: unless-stopped
+
