@@ -9,7 +9,8 @@ services:
       - "8201:8201" # Track B: OpenAI API Adapter & Stateful FastAPI Server
       - "8202:8202" # Track A: FastMCP SSE Server Adapter
     environment:
-      # Dual-Track Server Ports
+      # Dual-Track Server Ports & Unbuffered Logging
+      - PYTHONUNBUFFERED=1
       - PORT=8201
       - MCP_HOST=0.0.0.0
       - MCP_PORT=8202

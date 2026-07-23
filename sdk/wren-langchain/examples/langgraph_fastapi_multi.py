@@ -552,6 +552,8 @@ async def lifespan(app: FastAPI):
     """Lifecycle context manager to initialize the Wren Toolkit, MCP sessions, and checkpointer at startup."""
     global toolkit, langgraph_app, mcp_sessions, global_mcp_tools, mcp_retry_task, mcp_manager_task, mysql_exit_stack
     
+    print("[LIFESPAN] Starting dual-track server lifespan initialization...", flush=True)
+
     # Start persistent MCP manager task
     mcp_manager_task = asyncio.create_task(mcp_manager_worker())
     
@@ -560,14 +562,15 @@ async def lifespan(app: FastAPI):
     if project_path:
         project_path = project_path.strip().strip('"').strip("'")
         try:
-            print(f"Initializing WrenToolkit from project: {project_path}")
-            toolkit = WrenToolkit.from_project(project_path)
-            print("Successfully initialized WrenToolkit!")
+            print(f"[LIFESPAN] Initializing WrenToolkit from project: {project_path}...", flush=True)
+            # Run in worker thread to prevent blocking Uvicorn startup loop
+            toolkit = await asyncio.to_thread(WrenToolkit.from_project, project_path)
+            print("[LIFESPAN] Successfully initialized WrenToolkit!", flush=True)
         except Exception as e:
-            print(f"Warning: Error initializing WrenToolkit during lifespan startup: {e}. Will lazy-initialize on first request.")
+            print(f"[LIFESPAN Warning] Error initializing WrenToolkit during lifespan startup: {e}. Will lazy-initialize on first request.", flush=True)
 
     if not os.environ.get("OPENAI_API_KEY"):
-        print("WARNING: OPENAI_API_KEY is not set. Custom endpoint configuration or key will be required.")
+        print("[LIFESPAN Warning] OPENAI_API_KEY is not set. Custom endpoint configuration or key will be required.", flush=True)
 
     # 2. Initialize MCP Sessions
     mcp_config_dir = os.environ.get("MCP_CONFIG_DIR")
