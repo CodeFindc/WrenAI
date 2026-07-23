@@ -653,7 +653,7 @@ async def lifespan(app: FastAPI):
                 def _ping_unlocked(self):
                     try:
                         if self.conn:
-                            self.conn.ping(reconnect=True)
+                            self.conn.ping()
                     except Exception as e:
                         print(f"Failed to ping/reconnect MySQL database: {e}. Attempting clean reconnection...")
                         try:
