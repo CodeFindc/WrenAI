@@ -1051,34 +1051,60 @@ async def list_openai_models():
     }
 
 
+def convert_openai_messages(messages: list[OpenAIMessage]) -> list[BaseMessage]:
+    """Convert a list of OpenAI API format messages into LangChain BaseMessage objects."""
+    lc_messages = []
+    for msg in messages:
+        content = msg.content or ""
+        if isinstance(content, list):
+            parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+            content = " ".join(parts)
+            
+        role = msg.role.lower()
+        if role == "user":
+            lc_messages.append(HumanMessage(content=content))
+        elif role == "assistant":
+            lc_messages.append(AIMessage(content=content))
+        elif role == "system":
+            lc_messages.append(SystemMessage(content=content))
+        elif role == "tool":
+            lc_messages.append(ToolMessage(content=content, tool_call_id=msg.tool_call_id or "tool_call"))
+    return lc_messages
+
+
 @app.post("/v1/chat/completions")
-async def openai_chat_completions(request: OpenAIChatCompletionRequest):
-    """OpenAI API compatible chat completion endpoint supporting sync & SSE streaming."""
+async def openai_chat_completions(request: OpenAIChatCompletionRequest, http_req: Request = None):
+    """OpenAI API compatible chat completion endpoint supporting sync & SSE streaming and full context retention."""
     lazy_init_app(model_name=request.model)
 
-    # Extract user question from the last user message
-    question = ""
-    for msg in reversed(request.messages):
-        if msg.role == "user":
-            if isinstance(msg.content, str):
-                question = msg.content
-            elif isinstance(msg.content, list):
-                parts = [p.get("text", "") for p in msg.content if isinstance(p, dict) and p.get("type") == "text"]
-                question = " ".join(parts)
-            break
+    # 1. Resolve Session ID / Thread ID for LangGraph Checkpointer
+    session_id = request.user
+    if not session_id and http_req:
+        session_id = (
+            http_req.headers.get("x-session-id") or 
+            http_req.headers.get("x-conversation-id") or 
+            http_req.headers.get("session-id")
+        )
+    
+    # 2. Convert full messages array sent by DEEIX-Chat into LangChain message objects
+    input_messages = convert_openai_messages(request.messages)
+    if not input_messages:
+        input_messages = [HumanMessage(content="分析数据")]
 
-    if not question:
-        question = "分析数据"
-
-    actual_session_id = request.user or str(uuid.uuid4())
+    # If session_id is provided, use checkpointer thread. Otherwise fallback to stateful pass-through.
+    actual_session_id = session_id or str(uuid.uuid4())
     config = {"configurable": {"thread_id": actual_session_id}}
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
     created_ts = int(datetime.datetime.now().timestamp())
 
+    # If DEEIX-Chat sends full message history (more than 1 message), pass full array;
+    # If checkpointer session is reused with only 1 new message, pass last message.
+    graph_input = {"messages": input_messages} if len(input_messages) > 1 or not session_id else {"messages": [input_messages[-1]]}
+
     if not request.stream:
         try:
             final_state = await langgraph_app.ainvoke(
-                {"messages": [HumanMessage(content=question)]},
+                graph_input,
                 config=config
             )
             final_content = ""
@@ -1102,9 +1128,9 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
                     }
                 ],
                 "usage": {
-                    "prompt_tokens": len(question) // 4,
+                    "prompt_tokens": sum(len(str(m.content)) for m in input_messages) // 4,
                     "completion_tokens": len(final_content) // 4,
-                    "total_tokens": (len(question) + len(final_content)) // 4
+                    "total_tokens": (sum(len(str(m.content)) for m in input_messages) + len(final_content)) // 4
                 }
             }
         except Exception as e:
@@ -1132,7 +1158,7 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
 
         try:
             async for event in langgraph_app.astream(
-                {"messages": [HumanMessage(content=question)]},
+                graph_input,
                 config=config,
                 stream_mode="updates"
             ):
@@ -1187,6 +1213,7 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream_generator(), media_type="text/event-stream")
+
 
 
 
