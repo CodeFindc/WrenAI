@@ -742,51 +742,66 @@ async def lifespan(app: FastAPI):
                     if database:
                         database = urllib.parse.unquote(database)
                     
+                    # Valid keyword arguments for pymysql.connect
+                    valid_keys = {
+                        "host", "port", "user", "password", "database", "charset",
+                        "sql_mode", "read_default_file", "conv", "use_unicode",
+                        "client_flag", "cursorclass", "ssl", "read_timeout",
+                        "write_timeout", "connect_timeout", "autocommit", "ssl_disabled"
+                    }
+
                     conn_args = {
                         "host": parsed.hostname or "localhost",
                         "port": parsed.port or 3306,
                         "user": user,
                         "password": password or "",
                         "database": database,
+                        "connect_timeout": 5, # 5s timeout to prevent indefinite socket hangs
+                        "read_timeout": 15,
+                        "write_timeout": 15,
+                        "ssl_disabled": True,
+                        "autocommit": True
                     }
                     
                     if parsed.query:
                         params = urllib.parse.parse_qs(parsed.query)
                         for k, v in params.items():
-                            val = v[0]
-                            if val.lower() == "true":
-                                val = True
-                            elif val.lower() == "false":
-                                val = False
-                            elif val.isdigit():
-                                val = int(val)
-                            conn_args[k] = val
-                            
-                    # Force ssl_disabled=True by default to prevent any SSL/TLS upgrades
-                    conn_args.setdefault("ssl_disabled", True)
-                    conn_args.setdefault("autocommit", True)
-                    # Set connection and query timeouts to prevent indefinite socket hangs
-                    conn_args.setdefault("connect_timeout", 10)
-                    conn_args.setdefault("read_timeout", 30)
-                    conn_args.setdefault("write_timeout", 30)
+                            k_lower = k.lower()
+                            if k_lower in valid_keys:
+                                val = v[0]
+                                if val.lower() == "true":
+                                    val = True
+                                elif val.lower() == "false":
+                                    val = False
+                                elif val.isdigit():
+                                    val = int(val)
+                                conn_args[k_lower] = val
                     
-                    with pymysql.connect(**conn_args) as conn:
+                    print(f"[MySQL] Connecting to MySQL checkpointer at {conn_args['host']}:{conn_args['port']}/{database} (timeout: 5s)...", flush=True)
+                    conn = pymysql.connect(**conn_args)
+                    try:
                         saver = cls(conn=conn, serde=None, conn_args=conn_args)
                         yield saver
+                    finally:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
 
             if "autocommit" not in db_uri.lower():
                 separator = "&" if "?" in db_uri else "?"
                 db_uri = f"{db_uri}{separator}autocommit=true"
 
             checkpointer = mysql_exit_stack.enter_context(ReconnectingPyMySQLSaver.from_conn_string(db_uri))
+            print("[MySQL] Setting up checkpointer database tables...", flush=True)
             checkpointer.setup()
-            print("Successfully initialized persistent MySQL checkpointer with auto-reconnection!")
+            print("[MySQL] Successfully initialized persistent MySQL checkpointer with auto-reconnection!", flush=True)
         except ImportError:
             print("\nWARNING: 'langgraph-checkpoint-mysql' or 'pymysql' is not installed.")
             print("Falling back to in-memory MemorySaver...")
         except Exception as e:
-            print(f"\nERROR initializing MySQL checkpointer: {e}")
-            print("Falling back to in-memory MemorySaver...")
+            print(f"\n[MySQL Error] Failed to initialize MySQL checkpointer: {e}", flush=True)
+            print("Falling back to in-memory MemorySaver...", flush=True)
 
     if not checkpointer:
         if toolkit:
