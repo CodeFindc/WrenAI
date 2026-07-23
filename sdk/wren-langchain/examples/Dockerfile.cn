@@ -3,8 +3,10 @@ FROM node:20-slim AS frontend-builder
 
 WORKDIR /app
 
-# Replace Debian APT mirror with Tencent Cloud mirror (using HTTP protocol to avoid pre-install SSL errors)
-RUN (sed -i 's/https:\/\//http:\/\//g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true) && \
+# Configure APT to allow HTTPS connections prior to ca-certificates installation, enforcing HTTPS protocol
+RUN echo 'Acquire::https::Verify-Peer "false";' > /etc/apt/apt.conf.d/99ssl-trust && \
+    echo 'Acquire::https::Verify-Host "false";' >> /etc/apt/apt.conf.d/99ssl-trust && \
+    (sed -i 's/http:\/\//https:\/\//g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true) && \
     (sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true) && \
     (sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list 2>/dev/null || true)
 
@@ -28,8 +30,10 @@ FROM python:3.14
 
 WORKDIR /app
 
-# Replace Debian APT mirror with Tencent Cloud mirror (using HTTP protocol)
-RUN (sed -i 's/https:\/\//http:\/\//g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true) && \
+# Configure APT to allow HTTPS connections prior to ca-certificates installation, enforcing HTTPS protocol
+RUN echo 'Acquire::https::Verify-Peer "false";' > /etc/apt/apt.conf.d/99ssl-trust && \
+    echo 'Acquire::https::Verify-Host "false";' >> /etc/apt/apt.conf.d/99ssl-trust && \
+    (sed -i 's/http:\/\//https:\/\//g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true) && \
     (sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true) && \
     (sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list 2>/dev/null || true)
 
