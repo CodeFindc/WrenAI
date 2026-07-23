@@ -3,9 +3,9 @@ FROM node:20-slim AS frontend-builder
 
 WORKDIR /app
 
-# Replace Debian APT mirror with Tsinghua mirror for CN speedup
-RUN sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
-    sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list 2>/dev/null || true
+# Replace Debian APT mirror with Tencent Cloud mirror for CN speedup
+RUN sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+    sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list 2>/dev/null || true
 
 # Install git and ca-certificates
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -27,9 +27,9 @@ FROM python:3.14
 
 WORKDIR /app
 
-# Replace Debian APT mirror with Tsinghua mirror
-RUN sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
-    sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list 2>/dev/null || true
+# Replace Debian APT mirror with Tencent Cloud mirror
+RUN sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+    sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list 2>/dev/null || true
 
 # Install basic build tools and git
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -40,22 +40,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy pre-built frontend and code from stage 1
 COPY --from=frontend-builder /app /app
 
-# Configure PIP to use USTC mirror & Tsinghua mirror with prefer-binary flag
-ENV PIP_INDEX_URL=https://mirrors.ustc.edu.cn/pypi/web/simple
-ENV PIP_EXTRA_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+# Configure PIP to use Tencent Cloud & Aliyun mirrors with prefer-binary flag
+ENV PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple
+ENV PIP_EXTRA_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 ENV PIP_PREFER_BINARY=true
 
-# Install core/wren package via USTC PyPI mirror using --prefer-binary for ultra-fast wheel downloading
-RUN pip install --no-cache-dir --prefer-binary -i https://mirrors.ustc.edu.cn/pypi/web/simple -e /app/core/wren[all] 
+# Install core/wren package via Tencent Cloud PyPI mirror using --prefer-binary
+RUN pip install --no-cache-dir --prefer-binary -i https://mirrors.cloud.tencent.com/pypi/simple -e /app/core/wren[all] 
 
 # Install wren-langchain package
 WORKDIR /app/sdk/wren-langchain
 RUN sed -i 's/wren-engine/wrenai/g' pyproject.toml && \
-    pip install --no-cache-dir --prefer-binary -i https://mirrors.ustc.edu.cn/pypi/web/simple -e .[all]
+    pip install --no-cache-dir --prefer-binary -i https://mirrors.cloud.tencent.com/pypi/simple -e .[all]
 
 # Install additional requirements
 WORKDIR /app/sdk/wren-langchain/examples
-RUN pip install --no-cache-dir --prefer-binary -i https://mirrors.ustc.edu.cn/pypi/web/simple -r requirements.txt
+RUN pip install --no-cache-dir --prefer-binary -i https://mirrors.cloud.tencent.com/pypi/simple -r requirements.txt
 
 # Ensure entrypoint.sh is executable
 RUN chmod +x entrypoint.sh 
