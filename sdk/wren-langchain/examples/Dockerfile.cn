@@ -3,9 +3,10 @@ FROM node:20-slim AS frontend-builder
 
 WORKDIR /app
 
-# Replace Debian APT mirror with Tencent Cloud mirror for CN speedup
-RUN sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
-    sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list 2>/dev/null || true
+# Replace Debian APT mirror with Tencent Cloud mirror (using HTTP protocol to avoid pre-install SSL errors)
+RUN (sed -i 's/https:\/\//http:\/\//g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true) && \
+    (sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true) && \
+    (sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list 2>/dev/null || true)
 
 # Install git and ca-certificates
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -27,9 +28,10 @@ FROM python:3.14
 
 WORKDIR /app
 
-# Replace Debian APT mirror with Tencent Cloud mirror
-RUN sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
-    sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list 2>/dev/null || true
+# Replace Debian APT mirror with Tencent Cloud mirror (using HTTP protocol)
+RUN (sed -i 's/https:\/\//http:\/\//g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true) && \
+    (sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true) && \
+    (sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list 2>/dev/null || true)
 
 # Install basic build tools and git
 RUN apt-get update && apt-get install -y --no-install-recommends \
