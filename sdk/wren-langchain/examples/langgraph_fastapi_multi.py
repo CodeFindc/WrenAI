@@ -562,9 +562,9 @@ async def lifespan(app: FastAPI):
         try:
             print(f"Initializing WrenToolkit from project: {project_path}")
             toolkit = WrenToolkit.from_project(project_path)
+            print("Successfully initialized WrenToolkit!")
         except Exception as e:
-            print(f"Error initializing WrenToolkit: {e}")
-            sys.exit(1)
+            print(f"Warning: Error initializing WrenToolkit during lifespan startup: {e}. Will lazy-initialize on first request.")
 
     if not os.environ.get("OPENAI_API_KEY"):
         print("WARNING: OPENAI_API_KEY is not set. Custom endpoint configuration or key will be required.")
