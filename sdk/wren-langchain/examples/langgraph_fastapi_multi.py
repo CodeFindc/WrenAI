@@ -412,8 +412,29 @@ def get_current_time() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def build_app(toolkit: WrenToolkit, checkpointer, model_name: str = "gpt-4o"):
-    """Compile a ReAct graph that uses Wren tools and binds the provided checkpointer."""
+def ensure_wren_system_prompt(messages: list[BaseMessage], system_prompt: str) -> list[BaseMessage]:
+    """Ensure the Wren system prompt is present in the message list without duplicating or overriding existing system slots."""
+    if not system_prompt:
+        return list(messages)
+        
+    # Check if a SystemMessage with identical content already exists
+    for msg in messages:
+        if isinstance(msg, SystemMessage) and msg.content == system_prompt:
+            return list(messages)
+            
+    # Find the boundary of leading SystemMessages (if any)
+    insert_idx = 0
+    while insert_idx < len(messages) and isinstance(messages[insert_idx], SystemMessage):
+        insert_idx += 1
+        
+    # Insert Wren system prompt right after leading system messages (or at 0 if no SystemMessage)
+    new_messages = list(messages)
+    new_messages.insert(insert_idx, SystemMessage(content=system_prompt))
+    return new_messages
+
+
+def build_app(toolkit: WrenToolkit, checkpointer: Any = None, model_name: str = "gpt-4o"):
+    """Compile a ReAct graph that uses Wren tools and binds the provided checkpointer (or compiles statelessly if checkpointer=None)."""
     tools = toolkit.get_tools()
     tools.append(get_current_time)
     
@@ -456,8 +477,7 @@ def build_app(toolkit: WrenToolkit, checkpointer, model_name: str = "gpt-4o"):
     def agent_node(state: AgentState) -> dict:
         nonlocal model_with_tools
         messages = state["messages"]
-        if not messages or not isinstance(messages[0], SystemMessage):
-            messages = [SystemMessage(content=system_prompt), *messages]
+        messages = ensure_wren_system_prompt(messages, system_prompt)
         
         print(f"\n[LLM Request] Model to call: {model_to_use}")
         
@@ -490,7 +510,9 @@ def build_app(toolkit: WrenToolkit, checkpointer, model_name: str = "gpt-4o"):
     graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
     graph.add_edge("tools", "agent")
     
-    return graph.compile(checkpointer=checkpointer)
+    if checkpointer is not None:
+        return graph.compile(checkpointer=checkpointer)
+    return graph.compile()
 
 
 # ── Global state and Lifespan ──────────────────────────────────────────
@@ -498,11 +520,12 @@ def build_app(toolkit: WrenToolkit, checkpointer, model_name: str = "gpt-4o"):
 # Global toolkit and compiled langgraph app instances
 toolkit: WrenToolkit | None = None
 langgraph_app = None
+langgraph_app_stateless = None
 
 
 async def retry_failed_mcp_connections_loop():
     """Background task to periodically retry connecting to failed MCP servers and load their tools."""
-    global langgraph_app
+    global langgraph_app, langgraph_app_stateless
     retry_interval = float(os.environ.get("MCP_RETRY_INTERVAL", "30.0"))
     while True:
         try:
@@ -534,8 +557,9 @@ async def retry_failed_mcp_connections_loop():
                         global_mcp_tools.extend(new_tools)
                         initialized_mcp_servers.add(server_name)
                         
-                        global langgraph_app
+                        global langgraph_app, langgraph_app_stateless
                         langgraph_app = None
+                        langgraph_app_stateless = None
                         print(f"[MCP RETRY] Registered tools for '{server_name}' and cleared compiled LangGraph app cache.")
 
                     await asyncio.wait_for(_try_connect(), timeout=15.0)
@@ -828,9 +852,11 @@ async def lifespan(app: FastAPI):
         from langgraph.checkpoint.memory import MemorySaver
         checkpointer = MemorySaver()
 
-    # Build LangGraph app
-    if toolkit and checkpointer:
-        langgraph_app = build_app(toolkit, checkpointer)
+    # Build LangGraph apps (both stateful for native endpoints and stateless for OpenAI/DEEIX endpoint)
+    if toolkit:
+        print("[LIFESPAN] Compiling stateful and stateless LangGraph apps...", flush=True)
+        langgraph_app = build_app(toolkit, checkpointer=checkpointer)
+        langgraph_app_stateless = build_app(toolkit, checkpointer=None)
 
     try:
         yield
@@ -1135,35 +1161,38 @@ def health_check():
         "target_db_error": target_db_error,
         "checkpointer_type": checkpointer_type,
         "checkpointer_connected": checkpointer_status,
+        "stateless_graph_ready": langgraph_app_stateless is not None,
         "memory_enabled": toolkit._memory.enabled if toolkit and hasattr(toolkit, "_memory") else False
     }
+
+
+def get_exposed_openai_models() -> list[str]:
+    """Parse OPENAI_EXPOSED_MODELS environment variable (comma-separated). Fallback to defaults if empty."""
+    raw = os.getenv("OPENAI_EXPOSED_MODELS", "").strip()
+    if not raw:
+        return ["wren-agent", "wren-semantic-analyst"]
+    ids = [m.strip() for m in raw.split(",") if m.strip()]
+    return ids or ["wren-agent", "wren-semantic-analyst"]
 
 
 @app.get("/v1/models")
 async def list_openai_models():
     """OpenAI API compatible model discovery endpoint for DEEIX-Chat integration."""
+    models = get_exposed_openai_models()
     return {
         "object": "list",
         "data": [
             {
-                "id": "wren-agent",
+                "id": model_id,
                 "object": "model",
                 "created": 1700000000,
                 "owned_by": "wrenai",
                 "permission": [],
-                "root": "wren-agent",
-                "parent": None
-            },
-            {
-                "id": "wren-semantic-analyst",
-                "object": "model",
-                "created": 1700000000,
-                "owned_by": "wrenai",
-                "permission": [],
-                "root": "wren-semantic-analyst",
-                "parent": None
+                "root": model_id,
+                "parent": None,
             }
-        ]
+            for model_id in models
+        ],
     }
 
 
@@ -1189,49 +1218,41 @@ def convert_openai_messages(messages: list[OpenAIMessage]) -> list[BaseMessage]:
 
 
 @app.post("/v1/chat/completions")
-async def openai_chat_completions(request: OpenAIChatCompletionRequest, http_req: Request = None):
-    """OpenAI API compatible chat completion endpoint supporting sync & SSE streaming and full context retention."""
+async def openai_chat_completions(request: OpenAIChatCompletionRequest):
+    """OpenAI API compatible chat completion endpoint. Stateless: relies strictly on request messages[]."""
     lazy_init_app(model_name=request.model)
 
-    # 1. Resolve Session ID / Thread ID for LangGraph Checkpointer
-    session_id = request.user
-    if not session_id and http_req:
-        session_id = (
-            http_req.headers.get("x-session-id") or 
-            http_req.headers.get("x-conversation-id") or 
-            http_req.headers.get("session-id")
-        )
-    
-    # 2. Convert full messages array sent by DEEIX-Chat into LangChain message objects
+    if not request.messages:
+        raise HTTPException(status_code=400, detail="messages field cannot be empty.")
+
+    # 1. Convert full messages array sent by DEEIX-Chat / OpenAI clients into LangChain message objects
     input_messages = convert_openai_messages(request.messages)
     if not input_messages:
-        input_messages = [HumanMessage(content="分析数据")]
+        raise HTTPException(status_code=400, detail="No valid messages parsed from request.")
 
-    # If session_id is provided, use checkpointer thread. Otherwise fallback to stateful pass-through.
-    actual_session_id = session_id or str(uuid.uuid4())
-    config = {"configurable": {"thread_id": actual_session_id}}
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
     created_ts = int(datetime.datetime.now().timestamp())
-
-    # If DEEIX-Chat sends full message history (more than 1 message), pass full array;
-    # If checkpointer session is reused with only 1 new message, pass last message.
-    graph_input = {"messages": input_messages} if len(input_messages) > 1 or not session_id else {"messages": [input_messages[-1]]}
+    graph_input = {"messages": input_messages}
 
     if not request.stream:
         try:
-            final_state = await langgraph_app.ainvoke(
-                graph_input,
-                config=config
-            )
+            final_state = await langgraph_app_stateless.ainvoke(graph_input)
             final_content = ""
             if "messages" in final_state and final_state["messages"]:
-                # Try finding the last non-empty content from AIMessage or ToolMessage
+                # Prefer the last non-empty AIMessage content
                 for m in reversed(final_state["messages"]):
                     content = getattr(m, "content", "")
-                    if content and isinstance(content, str) and content.strip():
+                    if isinstance(m, AIMessage) and content and isinstance(content, str) and content.strip():
                         final_content = content.strip()
                         break
-            
+                # Fallback to last non-empty ToolMessage content if no AIMessage text is found
+                if not final_content:
+                    for m in reversed(final_state["messages"]):
+                        content = getattr(m, "content", "")
+                        if isinstance(m, ToolMessage) and content and isinstance(content, str) and content.strip():
+                            final_content = content.strip()
+                            break
+
             if not final_content:
                 final_content = "服务已收到您的消息。目前数据库或工具链尚无返回结果，请检查目标数据库连接及配置文件。"
 
@@ -1282,9 +1303,8 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest, http_req
         fallback_tool_content = ""
 
         try:
-            async for event in langgraph_app.astream(
+            async for event in langgraph_app_stateless.astream(
                 graph_input,
-                config=config,
                 stream_mode="updates"
             ):
                 for node_name, update in event.items():
@@ -1367,9 +1387,9 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest, http_req
 
 
 def lazy_init_app(model_name: str = "gpt-4o"):
-    """Thread-safe and exception-safe lazy initialization for the compiled LangGraph application."""
-    global langgraph_app, toolkit
-    if langgraph_app:
+    """Thread-safe and exception-safe lazy initialization for stateful and stateless LangGraph applications."""
+    global langgraph_app, langgraph_app_stateless, toolkit
+    if langgraph_app and langgraph_app_stateless:
         return
         
     project_path = os.environ.get("PROJECT_PATH")
@@ -1379,42 +1399,47 @@ def lazy_init_app(model_name: str = "gpt-4o"):
             detail="WrenToolkit not initialized. Please set PROJECT_PATH environment variable."
         )
     try:
-        toolkit = WrenToolkit.from_project(project_path)
-        
-        # Check if DB URI is set to use MySQL checkpointer even during lazy load
-        db_uri = os.environ.get("CHAT_HISTORY_DB_URI")
-        checkpointer = None
-        if db_uri and ReconnectingPyMySQLSaver:
-            db_uri = db_uri.strip().strip('"').strip("'")
-            if "autocommit" not in db_uri.lower():
-                separator = "&" if "?" in db_uri else "?"
-                db_uri = f"{db_uri}{separator}autocommit=true"
-            try:
-                import concurrent.futures
-                cand = mysql_exit_stack.enter_context(ReconnectingPyMySQLSaver.from_conn_string(db_uri))
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    fut = executor.submit(cand.setup)
-                    try:
-                        fut.result(timeout=10.0) # 10s timeout alignment with lifespan
-                        checkpointer = cand
-                        print("Lazy-initialized persistent MySQL checkpointer!")
-                    except (concurrent.futures.TimeoutError, Exception) as setup_err:
-                        print(f"Warning during lazy MySQL setup: {setup_err}. Cleaning up connection leak & falling back to MemorySaver.")
-                        try:
-                            mysql_exit_stack.pop_all().close()
-                        except Exception:
-                            pass
-                        checkpointer = None
-            except Exception as db_err:
-                print(f"Failed to lazy-initialize MySQL checkpointer: {db_err}. Falling back to MemorySaver...")
-                checkpointer = None
-                
-        if not checkpointer:
-            print("Using in-memory MemorySaver (data will clear on server reload) for lazy init.")
-            from langgraph.checkpoint.memory import MemorySaver
-            checkpointer = MemorySaver()
+        if not toolkit:
+            toolkit = WrenToolkit.from_project(project_path)
             
-        langgraph_app = build_app(toolkit, checkpointer, model_name=model_name)
+        if not langgraph_app:
+            # Check if DB URI is set to use MySQL checkpointer even during lazy load
+            db_uri = os.environ.get("CHAT_HISTORY_DB_URI")
+            checkpointer = None
+            if db_uri and ReconnectingPyMySQLSaver:
+                db_uri = db_uri.strip().strip('"').strip("'")
+                if "autocommit" not in db_uri.lower():
+                    separator = "&" if "?" in db_uri else "?"
+                    db_uri = f"{db_uri}{separator}autocommit=true"
+                try:
+                    import concurrent.futures
+                    cand = mysql_exit_stack.enter_context(ReconnectingPyMySQLSaver.from_conn_string(db_uri))
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        fut = executor.submit(cand.setup)
+                        try:
+                            fut.result(timeout=10.0) # 10s timeout alignment with lifespan
+                            checkpointer = cand
+                            print("Lazy-initialized persistent MySQL checkpointer!")
+                        except (concurrent.futures.TimeoutError, Exception) as setup_err:
+                            print(f"Warning during lazy MySQL setup: {setup_err}. Cleaning up connection leak & falling back to MemorySaver.")
+                            try:
+                                mysql_exit_stack.pop_all().close()
+                            except Exception:
+                                pass
+                            checkpointer = None
+                except Exception as db_err:
+                    print(f"Failed to lazy-initialize MySQL checkpointer: {db_err}. Falling back to MemorySaver...")
+                    checkpointer = None
+                    
+            if not checkpointer:
+                print("Using in-memory MemorySaver (data will clear on server reload) for lazy init.")
+                from langgraph.checkpoint.memory import MemorySaver
+                checkpointer = MemorySaver()
+                
+            langgraph_app = build_app(toolkit, checkpointer, model_name=model_name)
+
+        if not langgraph_app_stateless:
+            langgraph_app_stateless = build_app(toolkit, checkpointer=None, model_name=model_name)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to lazy initialize app: {e}")
 
