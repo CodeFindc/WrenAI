@@ -442,6 +442,7 @@ def build_app(toolkit: WrenToolkit, checkpointer, model_name: str = "gpt-4o"):
                 base_url=api_base,
                 api_key=api_key,
                 temperature=0,
+                request_timeout=60.0, # 60s request timeout to prevent LLM network/inference hang
                 model_kwargs={
                     "extra_body": {
                         "option": {
@@ -545,105 +546,7 @@ async def retry_failed_mcp_connections_loop():
             break
         except Exception as loop_err:
             print(f"[MCP RETRY] Error in background loop: {loop_err}")
-            await asyncio.sleep(retry_interval)
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Lifecycle context manager to initialize the Wren Toolkit, MCP sessions, and checkpointer at startup."""
-    global toolkit, langgraph_app, mcp_sessions, global_mcp_tools, mcp_retry_task, mcp_manager_task, mysql_exit_stack
-    
-    print("[LIFESPAN] Starting dual-track server lifespan initialization...", flush=True)
-
-    # Start persistent MCP manager task
-    mcp_manager_task = asyncio.create_task(mcp_manager_worker())
-    
-    # 1. Initialize Wren Toolkit
-    project_path = os.environ.get("PROJECT_PATH")
-    if project_path:
-        project_path = project_path.strip().strip('"').strip("'")
-        try:
-            print(f"[LIFESPAN] Initializing WrenToolkit from project: {project_path}...", flush=True)
-            # Run in worker thread to prevent blocking Uvicorn startup loop
-            toolkit = await asyncio.to_thread(WrenToolkit.from_project, project_path)
-            print("[LIFESPAN] Successfully initialized WrenToolkit!", flush=True)
-        except Exception as e:
-            print(f"[LIFESPAN Warning] Error initializing WrenToolkit during lifespan startup: {e}. Will lazy-initialize on first request.", flush=True)
-
-    if not os.environ.get("OPENAI_API_KEY"):
-        print("[LIFESPAN Warning] OPENAI_API_KEY is not set. Custom endpoint configuration or key will be required.", flush=True)
-
-    # 2. Initialize MCP Sessions
-    mcp_config_dir = os.environ.get("MCP_CONFIG_DIR")
-    if mcp_config_dir:
-        mcp_config_dir = mcp_config_dir.strip().strip('"').strip("'")
-        mcp_configs = load_mcp_configs(mcp_config_dir)
-        if mcp_configs:
-            print(f"Loaded {len(mcp_configs)} MCP server configs: {list(mcp_configs.keys())}")
-            mcp_configs_registry.update(mcp_configs)
-            try:
-                from mcp import ClientSession
-                
-                for server_name in mcp_configs.keys():
-                    try:
-                        async def _connect_server():
-                            session = await get_or_create_mcp_session(server_name)
-                            tools_result = await session.list_tools()
-                            print(f"Discovered {len(tools_result.tools)} tools from MCP server '{server_name}': {[t.name for t in tools_result.tools]}")
-                            
-                            for mcp_tool in tools_result.tools:
-                                lc_tool = convert_mcp_to_langchain(server_name, mcp_tool)
-                                global_mcp_tools.append(lc_tool)
-                            initialized_mcp_servers.add(server_name)
-
-                        await asyncio.wait_for(_connect_server(), timeout=15.0)
-                    except asyncio.TimeoutError:
-                        print(f"Failed to connect to MCP server '{server_name}': Connection or initialization timed out after 15.0 seconds.")
-                    except Exception as e:
-                        print(f"Failed to connect to MCP server '{server_name}': {e}")
-                
-                # Start background reconnect task for failed servers
-                failed_servers = set(mcp_configs.keys()) - initialized_mcp_servers
-                if failed_servers:
-                    global mcp_retry_task
-                    print(f"Starting background reconnect task for failed MCP servers: {list(failed_servers)}")
-                    mcp_retry_task = asyncio.create_task(retry_failed_mcp_connections_loop())
-            except ImportError:
-                print("Warning: 'mcp' package is not installed. Skipping MCP initialization.")
-
-    # 3. Determine Checkpointer
-    db_uri = os.environ.get("CHAT_HISTORY_DB_URI")
-    if db_uri:
-        db_uri = db_uri.strip().strip('"').strip("'")
-        
-    if db_uri and sys.platform.startswith("win") and "localhost" in db_uri:
-        try:
-            from urllib.parse import urlparse, urlunparse
-            parsed = urlparse(db_uri)
-            if parsed.hostname == "localhost":
-                netloc = parsed.netloc
-                if "@" in netloc:
-                    user_pass, host_port = netloc.rsplit("@", 1)
-                    if host_port.startswith("localhost:"):
-                        host_port = "127.0.0.1" + host_port[len("localhost"):]
-                    elif host_port == "localhost":
-                        host_port = "127.0.0.1"
-                    new_netloc = f"{user_pass}@{host_port}"
-                else:
-                    if netloc.startswith("localhost:"):
-                        new_netloc = "127.0.0.1" + netloc[len("localhost"):]
-                    elif netloc == "localhost":
-                        new_netloc = "127.0.0.1"
-                parsed = parsed._replace(netloc=new_netloc)
-                db_uri = urlunparse(parsed)
-                print(f"Auto-resolved 'localhost' to '127.0.0.1' in database URI for Windows compatibility.")
-        except Exception as e:
-            print(f"Warning: Failed to auto-resolve localhost in CHAT_HISTORY_URI: {e}")
-
-    checkpointer = None
-    # mysql_exit_stack is globally defined and initialized
-    
-# ── Module-Level Reconnecting PyMySQL Checkpointer ─────────────────────
+            await asyncio.sleep(retry_interval)# ── Module-Level Reconnecting PyMySQL Checkpointer ─────────────────────
 
 try:
     from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
@@ -900,16 +803,21 @@ async def lifespan(app: FastAPI):
                 separator = "&" if "?" in db_uri else "?"
                 db_uri = f"{db_uri}{separator}autocommit=true"
 
-            checkpointer = mysql_exit_stack.enter_context(ReconnectingPyMySQLSaver.from_conn_string(db_uri))
+            # Connect inside thread pool to prevent blocking main loop if socket hangs
+            checkpointer_candidate = await asyncio.to_thread(
+                lambda: mysql_exit_stack.enter_context(ReconnectingPyMySQLSaver.from_conn_string(db_uri))
+            )
             print("[MySQL] Setting up checkpointer database tables (timeout: 10s)...", flush=True)
             try:
-                await asyncio.wait_for(asyncio.to_thread(checkpointer.setup), timeout=10.0)
+                await asyncio.wait_for(asyncio.to_thread(checkpointer_candidate.setup), timeout=10.0)
+                checkpointer = checkpointer_candidate
                 print("[MySQL] Successfully initialized persistent MySQL checkpointer with auto-reconnection!", flush=True)
-            except asyncio.TimeoutError:
-                print("[MySQL Warning] Checkpointer table setup timed out after 10s (possible MySQL metadata lock). Falling back to in-memory MemorySaver for Q&A reliability.", flush=True)
-                checkpointer = None
-            except Exception as setup_err:
-                print(f"[MySQL Warning] Checkpointer table setup error: {setup_err}. Falling back to in-memory MemorySaver for Q&A reliability.", flush=True)
+            except (asyncio.TimeoutError, Exception) as setup_err:
+                print(f"[MySQL Warning] Checkpointer table setup failed/timed out: {setup_err}. Cleaning up connection leakage and falling back to in-memory MemorySaver.", flush=True)
+                try:
+                    mysql_exit_stack.pop_all().close()
+                except Exception:
+                    pass
                 checkpointer = None
         except Exception as e:
             print(f"\n[MySQL Error] Failed to initialize MySQL checkpointer: {e}", flush=True)
@@ -1482,13 +1390,21 @@ def lazy_init_app(model_name: str = "gpt-4o"):
                 separator = "&" if "?" in db_uri else "?"
                 db_uri = f"{db_uri}{separator}autocommit=true"
             try:
-                checkpointer = mysql_exit_stack.enter_context(ReconnectingPyMySQLSaver.from_conn_string(db_uri))
-                try:
-                    checkpointer.setup()
-                    print("Lazy-initialized persistent MySQL checkpointer!")
-                except Exception as setup_err:
-                    print(f"Warning during lazy MySQL checkpointer setup: {setup_err}. Falling back to MemorySaver for reliability.")
-                    checkpointer = None
+                import concurrent.futures
+                cand = mysql_exit_stack.enter_context(ReconnectingPyMySQLSaver.from_conn_string(db_uri))
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    fut = executor.submit(cand.setup)
+                    try:
+                        fut.result(timeout=10.0) # 10s timeout alignment with lifespan
+                        checkpointer = cand
+                        print("Lazy-initialized persistent MySQL checkpointer!")
+                    except (concurrent.futures.TimeoutError, Exception) as setup_err:
+                        print(f"Warning during lazy MySQL setup: {setup_err}. Cleaning up connection leak & falling back to MemorySaver.")
+                        try:
+                            mysql_exit_stack.pop_all().close()
+                        except Exception:
+                            pass
+                        checkpointer = None
             except Exception as db_err:
                 print(f"Failed to lazy-initialize MySQL checkpointer: {db_err}. Falling back to MemorySaver...")
                 checkpointer = None
