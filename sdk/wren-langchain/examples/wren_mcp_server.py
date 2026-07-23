@@ -50,21 +50,26 @@ async def wren_semantic_query(question: str) -> str:
     try:
         toolkit = get_toolkit()
         tools = toolkit.get_tools()
-        if tools:
-            query_tool = tools[0]
-            if hasattr(query_tool, "ainvoke"):
-                res = await query_tool.ainvoke({"query": question})
-                return str(res)
-            elif hasattr(query_tool, "invoke"):
-                res = query_tool.invoke({"query": question})
-                return str(res)
-        
+        if not tools:
+            return "Error: No semantic tools available. Please ensure models are defined and connection profiles are configured in profiles.yml."
+            
+        query_tool = tools[0]
+        if hasattr(query_tool, "ainvoke"):
+            res = await query_tool.ainvoke({"query": question})
+            return str(res)
+        elif hasattr(query_tool, "invoke"):
+            res = query_tool.invoke({"query": question})
+            return str(res)
+    
         if hasattr(toolkit, "query"):
             res = toolkit.query(question)
             return str(res)
         return "No suitable query execution mechanism found in WrenToolkit."
     except Exception as e:
-        return f"Error executing semantic query: {e}"
+        err_msg = str(e)
+        if "connection" in err_msg.lower() or "refused" in err_msg.lower() or "timeout" in err_msg.lower():
+            return f"Database Connection Error: Failed to execute query. Target database appears unreachable or unconfigured. Detail: {err_msg}"
+        return f"Error executing semantic query: {err_msg}"
 
 
 @mcp.tool(

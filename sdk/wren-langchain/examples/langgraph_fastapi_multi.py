@@ -1089,11 +1089,40 @@ def get_swagger_favicon():
 
 @app.get("/health")
 def health_check():
-    """Simple health endpoint."""
+    """Comprehensive health check endpoint providing DB connectivity and toolkit diagnostic status."""
+    target_db_status = False
+    target_db_error = None
+    tools_count = 0
+
+    if toolkit:
+        try:
+            tools = toolkit.get_tools()
+            tools_count = len(tools)
+            target_db_status = tools_count > 0
+        except Exception as e:
+            target_db_error = str(e)
+    else:
+        target_db_error = "WrenToolkit not initialized. Please verify PROJECT_PATH and models directory."
+
+    checkpointer_status = False
+    checkpointer_type = "MemorySaver"
+    if langgraph_app and hasattr(langgraph_app, "checkpointer"):
+        cp = langgraph_app.checkpointer
+        checkpointer_type = type(cp).__name__
+        if "MySQL" in checkpointer_type or hasattr(cp, "conn"):
+            checkpointer_status = True
+        else:
+            checkpointer_status = True
+
     return {
-        "status": "healthy",
+        "status": "healthy" if (toolkit is not None and target_db_status) else "degraded",
         "project_loaded": toolkit is not None,
-        "memory_enabled": toolkit._memory.enabled if toolkit else False
+        "tools_count": tools_count,
+        "target_db_connected": target_db_status,
+        "target_db_error": target_db_error,
+        "checkpointer_type": checkpointer_type,
+        "checkpointer_connected": checkpointer_status,
+        "memory_enabled": toolkit._memory.enabled if toolkit and hasattr(toolkit, "_memory") else False
     }
 
 
