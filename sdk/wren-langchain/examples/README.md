@@ -77,11 +77,17 @@ Configure the services via environment variables:
 
 ### Option 1: Docker Compose (Recommended for Production)
 
-Run both Track A and Track B in containerized mode:
-
+Standard build & launch:
 ```bash
 docker-compose up -d --build
 ```
+
+**China Mainland Network Accelerated Build (中国大陆网络极速构建)**:
+```bash
+docker-compose -f docker-compose.cn.yaml build --no-cache
+docker-compose -f docker-compose.cn.yaml up -d
+```
+*(Uses Tsinghua APT mirror, npmmirror registry, PyPI Tsinghua mirror, and GitHub proxy for ultra-fast build in Mainland China)*
 
 - **Track B (OpenAI Proxy & API)**: `http://localhost:8201/v1`
 - **Track A (FastMCP SSE Server)**: `http://localhost:8202/sse`

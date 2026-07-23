@@ -1,0 +1,67 @@
+# Stage 1: Build the frontend chat UI (CN Accelerated Version)
+FROM node:20-slim AS frontend-builder
+
+WORKDIR /app
+
+# Replace Debian APT mirror with Tsinghua mirror for CN speedup
+RUN sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+    sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list 2>/dev/null || true
+
+# Install git and ca-certificates
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone the dev branch using GitHub acceleration proxy
+RUN git clone -b dev https://cdn.gh-proxy.org/https://github.com/CodeFindc/WrenAI.git /app || \
+    git clone -b dev https://mirror.ghproxy.com/https://github.com/CodeFindc/WrenAI.git /app
+
+# Install dependencies using npmmirror (Taobao mirror) and build frontend UI
+WORKDIR /app/sdk/wren-langchain/examples/wren-chat-ui
+RUN npm config set registry https://registry.npmmirror.com && \
+    npm ci && npm run build && rm -rf node_modules
+
+# Stage 2: Final python image (CN Accelerated Version)
+FROM python:3.14
+
+WORKDIR /app
+
+# Replace Debian APT mirror with Tsinghua mirror
+RUN sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+    sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list 2>/dev/null || true
+
+# Install basic build tools and git
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy pre-built frontend and code from stage 1
+COPY --from=frontend-builder /app /app
+
+# Configure PIP to use Tsinghua & Aliyun mirrors
+ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ENV PIP_EXTRA_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+
+# Install core/wren package via Tsinghua PyPI mirror
+RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -e /app/core/wren[all] 
+
+# Install wren-langchain package
+WORKDIR /app/sdk/wren-langchain
+RUN sed -i 's/wren-engine/wrenai/g' pyproject.toml && \
+    pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -e .[all]
+
+# Install additional requirements
+WORKDIR /app/sdk/wren-langchain/examples
+RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
+
+# Ensure entrypoint.sh is executable
+RUN chmod +x entrypoint.sh 
+
+# Expose API and MCP ports
+EXPOSE 8201 8202
+
+# Use entrypoint.sh and python3 launcher
+ENTRYPOINT ["./entrypoint.sh"]
+CMD ["python3", "start_dual_services.py"]

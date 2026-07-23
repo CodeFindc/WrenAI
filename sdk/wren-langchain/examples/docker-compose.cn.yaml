@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  wren-langgraph-api:
+    build:
+      context: ../../../
+      dockerfile: sdk/wren-langchain/examples/Dockerfile.cn
+    ports:
+      - "8201:8201" # Track B: OpenAI API Adapter & Stateful FastAPI Server
+      - "8202:8202" # Track A: FastMCP SSE Server Adapter
+    environment:
+      # Dual-Track Server Ports
+      - PORT=8201
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8202
+
+      # PIP Index Mirror
+      - PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+
+      # OpenAI API config Embedded Model (or general OpenAI-compatible endpoints)
+      - WREN_EMBEDDING_PROVIDER=openai
+      - WREN_EMBEDDING_MODEL=${WREN_EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B}
+      - EM_OPENAI_API_KEY=${EM_OPENAI_API_KEY:-sk-HDoRjhs3Z4WIeU1cYfho9jaNQWvye5lPWyY1YpEmmJpdrBjx}
+      - EM_OPENAI_BASE_URL=${EM_OPENAI_BASE_URL:-http://192.168.110.208:8100/v1}
+
+      # OpenAI API config (or general OpenAI-compatible endpoints)
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_API_BASE=${OPENAI_API_BASE:-}
+
+      # Override configurations for standard LLM parameters if needed
+      - LLM_API_BASE=${LLM_API_BASE:-}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_MODEL_NAME=${LLM_MODEL_NAME:-gpt-4o}
+
+      # DB Connection string for LangGraph persistent session history checkpointer
+      # If not set, server defaults to in-memory checkpointer.
+      - CHAT_HISTORY_DB_URI=${CHAT_HISTORY_DB_URI:-}
+
+      # Internal container project path
+      - PROJECT_PATH=/project
+
+      # Environment variables for automatic connection profile setup inside entrypoint.sh
+      - ACTIVE_PROFILE=${ACTIVE_PROFILE:-default}
+      - DATASOURCE=${DATASOURCE:-}
+      - DB_HOST=${DB_HOST:-}
+      - DB_PORT=${DB_PORT:-}
+      - DB_NAME=${DB_NAME:-}
+      - DB_USER=${DB_USER:-}
+      - DB_PASSWORD=${DB_PASSWORD:-}
+      - SSL_MODE=${SSL_MODE:-}
+      - EXTRA_PROFILE_KEYS=${EXTRA_PROFILE_KEYS:-}
+      - STREAM=1
+    volumes:
+      # Mount host directory for project configs, models, target MDL and database profiles.
+      - ./wren_project:/project
+    restart: unless-stopped
