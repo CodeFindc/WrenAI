@@ -760,14 +760,15 @@ async def lifespan(app: FastAPI):
                         "read_timeout": 15,
                         "write_timeout": 15,
                         "ssl_disabled": True,
-                        "autocommit": True
+                        "autocommit": True,
+                        "init_command": "SET SESSION lock_wait_timeout = 5" # 5s DDL lock timeout to prevent infinite Waiting for metadata lock
                     }
-                    
+
                     if parsed.query:
                         params = urllib.parse.parse_qs(parsed.query)
                         for k, v in params.items():
                             k_lower = k.lower()
-                            if k_lower in valid_keys:
+                            if k_lower in valid_keys and k_lower != "init_command":
                                 val = v[0]
                                 if val.lower() == "true":
                                     val = True
@@ -793,9 +794,14 @@ async def lifespan(app: FastAPI):
                 db_uri = f"{db_uri}{separator}autocommit=true"
 
             checkpointer = mysql_exit_stack.enter_context(ReconnectingPyMySQLSaver.from_conn_string(db_uri))
-            print("[MySQL] Setting up checkpointer database tables...", flush=True)
-            checkpointer.setup()
-            print("[MySQL] Successfully initialized persistent MySQL checkpointer with auto-reconnection!", flush=True)
+            print("[MySQL] Setting up checkpointer database tables (timeout: 10s)...", flush=True)
+            try:
+                await asyncio.wait_for(asyncio.to_thread(checkpointer.setup), timeout=10.0)
+                print("[MySQL] Successfully initialized persistent MySQL checkpointer with auto-reconnection!", flush=True)
+            except asyncio.TimeoutError:
+                print("[MySQL Warning] Checkpointer table setup timed out after 10s (possible MySQL metadata lock). Proceeding with initialized checkpointer.", flush=True)
+            except Exception as setup_err:
+                print(f"[MySQL Warning] Checkpointer table setup warning: {setup_err}. Proceeding with initialized checkpointer.", flush=True)
         except ImportError:
             print("\nWARNING: 'langgraph-checkpoint-mysql' or 'pymysql' is not installed.")
             print("Falling back to in-memory MemorySaver...")
