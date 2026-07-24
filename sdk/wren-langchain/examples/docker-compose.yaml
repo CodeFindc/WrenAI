@@ -36,6 +36,7 @@ services:
       - OPENAI_PROCESS_MAX_TOOL_CHARS=${OPENAI_PROCESS_MAX_TOOL_CHARS:-400}
       - OPENAI_SSE_KEEPALIVE_SECONDS=${OPENAI_SSE_KEEPALIVE_SECONDS:-15}
       - OPENAI_SSE_KEEPALIVE_STYLE=${OPENAI_SSE_KEEPALIVE_STYLE:-comment}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
 
       # DB Connection string for LangGraph persistent session history checkpointer
       # If not set, server defaults to in-memory checkpointer.

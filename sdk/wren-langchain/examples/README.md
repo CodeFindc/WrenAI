@@ -73,8 +73,37 @@ Configure the services via environment variables:
 | `OPENAI_PROCESS_MAX_TOOL_CHARS` | Max character limit for tool execution summary in process stream. | `400` |
 | `OPENAI_SSE_KEEPALIVE_SECONDS` | SSE keepalive interval in seconds (default: 15, set <= 0 to disable). | `15` |
 | `OPENAI_SSE_KEEPALIVE_STYLE` | SSE keepalive format: `comment` (`: keepalive\n\n`) or `empty_delta`. | `comment` |
+| `LOG_LEVEL` | Log verbosity level: `DEBUG`, `INFO` (default), `WARNING`, `ERROR`. | `INFO` |
 | `CHAT_HISTORY_DB_URI` | Optional MySQL connection string for thread checkpointer. | `mysql+pymysql://user:pass@localhost:3306/db` |
 | `MCP_CONFIG_DIR` | Optional directory containing external MCP JSON configs. | `./mcp_configs` |
+
+---
+
+## Structured Logging & Request Traceability
+
+All application logs follow a structured format tagged with `[req=<request_id>]` for end-to-end request tracing:
+
+```text
+2026-07-24 15:40:01 INFO [wren.sse] [req=chatcmpl-a0e2] stream_start route=/v1/chat/completions model=wren-agent process_mode=reasoning keepalive=15.0s style=comment
+2026-07-24 15:40:02 INFO [wren.tool] [req=chatcmpl-a0e2] tool_start name=wren_semantic_query args={"question":"Summary of sales..."}
+2026-07-24 15:40:03 INFO [wren.tool] [req=chatcmpl-a0e2] tool_end name=wren_semantic_query result_chars=1200
+2026-07-24 15:40:04 INFO [wren.llm] [req=chatcmpl-a0e2] invoke_start model=gpt-4o base=default messages=6
+2026-07-24 15:40:18 INFO [wren.llm] [req=chatcmpl-a0e2] invoke_end duration_ms=14012 has_tool_calls=false content_chars=256
+2026-07-24 15:40:18 INFO [wren.sse] [req=chatcmpl-a0e2] stream_end outcome=ok duration_ms=17050 keepalive_count=1 yielded_content=true
+```
+
+### Useful Log Inspection Commands
+
+```bash
+# 1. Trace a specific request end-to-end
+docker logs wren-langgraph-api 2>&1 | grep 'req=chatcmpl-a0e2'
+
+# 2. Monitor stream lifecycle and outcomes (ok/error)
+docker logs wren-langgraph-api 2>&1 | grep 'stream_end'
+
+# 3. Inspect errors and exceptions with stack traces
+docker logs wren-langgraph-api 2>&1 | grep ' ERROR '
+```
 
 ---
 

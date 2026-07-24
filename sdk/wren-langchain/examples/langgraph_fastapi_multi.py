@@ -56,8 +56,55 @@ import uuid
 import glob
 import asyncio
 import threading
+import time
+import logging
+from contextvars import ContextVar
 from typing import Annotated, TypedDict, Literal, Any, Type, Dict, List
 from contextlib import asynccontextmanager, AsyncExitStack
+
+# ── Structured Logging Setup ───────────────────────────────────────────
+
+request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
+
+class StructuredRequestFormatter(logging.Formatter):
+    """Custom formatter to inject [req=<request_id>] into log records."""
+    def format(self, record: logging.LogRecord) -> str:
+        record.req_id = request_id_var.get("-")
+        return super().format(record)
+
+def setup_logging() -> logging.Logger:
+    """Initialize structured logging using stdlib logging module."""
+    log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_level = getattr(logging, log_level_str, logging.INFO)
+    
+    logger = logging.getLogger("wren")
+    logger.setLevel(log_level)
+    
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setLevel(log_level)
+        formatter = StructuredRequestFormatter(
+            fmt="%(asctime)s %(levelname)s [%(name)s] [req=%(req_id)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        
+    return logger
+
+logger = setup_logging()
+
+def get_logger(submodule: str) -> logging.Logger:
+    return logging.getLogger(f"wren.{submodule}")
+
+logger_lifespan = get_logger("lifespan")
+logger_mysql = get_logger("mysql")
+logger_mcp = get_logger("mcp")
+logger_llm = get_logger("llm")
+logger_tool = get_logger("tool")
+logger_api = get_logger("api")
+logger_sse = get_logger("sse")
+logger_chat = get_logger("chat")
 
 try:
     from fastapi import FastAPI, HTTPException, Response
@@ -479,21 +526,24 @@ def build_app(toolkit: WrenToolkit, checkpointer: Any = None, model_name: str = 
         messages = state["messages"]
         messages = ensure_wren_system_prompt(messages, system_prompt)
         
-        print(f"\n[LLM Request] Model to call: {model_to_use}")
+        logger_llm.info(f"invoke_start model={model_to_use} base={api_base or 'default'} messages={len(messages)}")
+        start_time = time.perf_counter()
         
         try:
             model = get_model()
             response = model.invoke(messages)
         except Exception as e:
-            # Catch LLM connection/invocation errors, reset client session and retry
-            print(f"LLM invocation failed: {e}. Resetting client connection pool and retrying...")
-            model_with_tools = None  # Discard the broken client session
-            
-            # Retry with a fresh client session
+            logger_llm.warning(f"invoke_retry LLM call failed: {e}. Resetting client connection pool and retrying...")
+            model_with_tools = None  # Discard broken client session
             model = get_model()
             response = model.invoke(messages)
             
-        print(f"[LLM Response Metadata] Received metadata: {response.response_metadata}\n")
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+        has_tool_calls = bool(getattr(response, "tool_calls", None))
+        content_len = len(str(getattr(response, "content", "") or ""))
+        
+        logger_llm.info(f"invoke_end duration_ms={duration_ms} has_tool_calls={has_tool_calls} content_chars={content_len}")
+        logger_llm.debug(f"invoke_metadata response_metadata={getattr(response, 'response_metadata', {})}")
         
         return {"messages": [response]}
 
@@ -1321,6 +1371,7 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
         raise HTTPException(status_code=400, detail="No valid messages parsed from request.")
 
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
+    token = request_id_var.set(completion_id)
     created_ts = int(datetime.datetime.now().timestamp())
     graph_input = {"messages": input_messages}
     
@@ -1328,6 +1379,8 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
     max_tool_chars = get_openai_process_max_tool_chars()
 
     if not request.stream:
+        sync_start_time = time.perf_counter()
+        logger_api.info(f"request_start route=/v1/chat/completions model={request.model} stream=false messages={len(input_messages)}")
         try:
             final_state = await langgraph_app_stateless.ainvoke(graph_input)
             final_content = ""
@@ -1362,6 +1415,10 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
             if stream_mode in ("reasoning", "both") and reasoning_traces:
                 msg_payload["reasoning_content"] = "\n\n".join(reasoning_traces)
 
+            duration_ms = int((time.perf_counter() - sync_start_time) * 1000)
+            logger_api.info(f"request_end route=/v1/chat/completions status=200 duration_ms={duration_ms} content_chars={len(final_content)}")
+            request_id_var.reset(token)
+
             return {
                 "id": completion_id,
                 "object": "chat.completion",
@@ -1381,12 +1438,20 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
                 }
             }
         except Exception as e:
-            import traceback
-            traceback.print_exc()
+            duration_ms = int((time.perf_counter() - sync_start_time) * 1000)
+            logger_api.error(f"request_fail route=/v1/chat/completions duration_ms={duration_ms} error={e}", exc_info=True)
+            request_id_var.reset(token)
             raise HTTPException(status_code=500, detail=f"Execution error: {str(e)}")
 
     # Streaming mode (SSE)
     async def event_stream_generator():
+        stream_start_time = time.perf_counter()
+        stream_outcome = "ok"
+        keepalive_s = get_openai_sse_keepalive_seconds()
+        keepalive_style = get_openai_sse_keepalive_style()
+
+        logger_sse.info(f"stream_start route=/v1/chat/completions model={request.model} process_mode={stream_mode} keepalive={keepalive_s}s style={keepalive_style}")
+
         # Initial chunk specifying assistant role
         yield make_chat_chunk(completion_id, request.model, created_ts, {"role": "assistant"})
 
@@ -1417,9 +1482,6 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
                 chunks.append(make_chat_chunk(completion_id, request.model, created_ts, {"content": f"_{trace_text}_\n\n"}))
             return chunks
 
-        keepalive_s = get_openai_sse_keepalive_seconds()
-        keepalive_style = get_openai_sse_keepalive_style()
-
         try:
             while True:
                 try:
@@ -1429,15 +1491,17 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
                         item_type, item_data = await stream_queue.get()
                 except asyncio.TimeoutError:
                     keepalive_count += 1
+                    logger_sse.debug(f"keepalive_ping count={keepalive_count} style={keepalive_style}")
                     if keepalive_count == 1 or keepalive_count % 4 == 0:
-                        print(f"[SSE KEEPALIVE] Sent keepalive ping #{keepalive_count} for request {completion_id} (style: {keepalive_style})", flush=True)
+                        logger_sse.info(f"keepalive_ping count={keepalive_count} style={keepalive_style}")
                     yield make_sse_keepalive_chunk(completion_id, request.model, created_ts, keepalive_style)
                     continue
 
                 if item_type == "end":
                     break
                 elif item_type == "error":
-                    print(f"[SSE STREAM ERROR] Exception during stream for {completion_id}: {item_data}", flush=True)
+                    stream_outcome = "error"
+                    logger_sse.error(f"stream_error Exception during stream: {item_data}")
                     yield make_chat_chunk(completion_id, request.model, created_ts, {"content": f"\n[执行异常: {item_data}]"})
                     break
                 elif item_type == "progress":
@@ -1451,6 +1515,10 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
                             if isinstance(msg, AIMessage):
                                 tool_calls = getattr(msg, "tool_calls", None)
                                 if tool_calls:
+                                    for tc in tool_calls:
+                                        t_name = tc.get("name", "unknown") if isinstance(tc, dict) else getattr(tc, "name", "unknown")
+                                        t_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                                        logger_tool.info(f"tool_start name={t_name} args={sanitize_and_truncate_text(t_args, 150)}")
                                     trace_str = format_process_tool_start(tool_calls)
                                     for chk in emit_process_trace(trace_str):
                                         yield chk
@@ -1460,10 +1528,12 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
                                     yield make_chat_chunk(completion_id, request.model, created_ts, {"content": content})
                                     yielded_any_content = True
                             elif isinstance(msg, ToolMessage):
+                                t_name = getattr(msg, "name", "tool")
+                                content = getattr(msg, "content", "")
+                                logger_tool.info(f"tool_end name={t_name} result_chars={len(str(content or ''))}")
                                 trace_str = format_process_tool_result(msg, max_tool_chars)
                                 for chk in emit_process_trace(trace_str):
                                     yield chk
-                                content = getattr(msg, "content", "")
                                 if content and isinstance(content, str) and content.strip():
                                     fallback_tool_content = content.strip()
 
@@ -1477,6 +1547,9 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
                 import contextlib
                 with contextlib.suppress(asyncio.CancelledError):
                     await astream_task
+            stream_duration_ms = int((time.perf_counter() - stream_start_time) * 1000)
+            logger_sse.info(f"stream_end outcome={stream_outcome} duration_ms={stream_duration_ms} keepalive_count={keepalive_count} yielded_content={yielded_any_content}")
+            request_id_var.reset(token)
 
         yield make_chat_chunk(completion_id, request.model, created_ts, {}, finish_reason="stop")
         yield "data: [DONE]\n\n"
