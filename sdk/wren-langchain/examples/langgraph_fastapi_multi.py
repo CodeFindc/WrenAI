@@ -1371,7 +1371,7 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
         raise HTTPException(status_code=400, detail="No valid messages parsed from request.")
 
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
-    token = request_id_var.set(completion_id)
+    request_id_var.set(completion_id)
     created_ts = int(datetime.datetime.now().timestamp())
     graph_input = {"messages": input_messages}
     
@@ -1417,7 +1417,6 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
 
             duration_ms = int((time.perf_counter() - sync_start_time) * 1000)
             logger_api.info(f"request_end route=/v1/chat/completions status=200 duration_ms={duration_ms} content_chars={len(final_content)}")
-            request_id_var.reset(token)
 
             return {
                 "id": completion_id,
@@ -1440,11 +1439,11 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
         except Exception as e:
             duration_ms = int((time.perf_counter() - sync_start_time) * 1000)
             logger_api.error(f"request_fail route=/v1/chat/completions duration_ms={duration_ms} error={e}", exc_info=True)
-            request_id_var.reset(token)
             raise HTTPException(status_code=500, detail=f"Execution error: {str(e)}")
 
     # Streaming mode (SSE)
     async def event_stream_generator():
+        request_id_var.set(completion_id)
         stream_start_time = time.perf_counter()
         stream_outcome = "ok"
         keepalive_s = get_openai_sse_keepalive_seconds()
@@ -1549,7 +1548,6 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
                     await astream_task
             stream_duration_ms = int((time.perf_counter() - stream_start_time) * 1000)
             logger_sse.info(f"stream_end outcome={stream_outcome} duration_ms={stream_duration_ms} keepalive_count={keepalive_count} yielded_content={yielded_any_content}")
-            request_id_var.reset(token)
 
         yield make_chat_chunk(completion_id, request.model, created_ts, {}, finish_reason="stop")
         yield "data: [DONE]\n\n"
