@@ -55,27 +55,55 @@ This directory contains production-ready code demonstrating how to wrap a Wren A
 
 ---
 
-## Environment Variables
+---
 
-Configure the services via environment variables:
+## Environment Variables Reference
 
+The Dual-Track services (FastMCP SSE and OpenAI-compatible API) can be fully customized via environment variables:
+
+### 1. Core Services & Network Binding
 | Variable | Description | Default / Example |
 |---|---|---|
-| `PROJECT_PATH` | Path to the prepared Wren project directory (holding `.wren`). | `/project` or `./wren_project` |
-| `PORT` | Port for Track B FastAPI / OpenAI Proxy server. | `8201` |
-| `MCP_HOST` | Host binding for Track A FastMCP SSE server. | `0.0.0.0` |
-| `MCP_PORT` | Port for Track A FastMCP SSE server. | `8202` |
-| `OPENAI_API_KEY` | API Key for upstream LLM used by LangGraph. | `sk-proj-...` |
-| `LLM_API_BASE` | Custom base URL for LLM service (e.g., vLLM, Ollama, OneAPI). | `http://localhost:8000/v1` |
-| `LLM_MODEL_NAME` | Model name override for upstream LLM. | `gpt-4o` |
-| `OPENAI_EXPOSED_MODELS` | Virtual model IDs returned by `GET /v1/models`. | `wren-agent,wren-semantic-analyst` |
-| `OPENAI_PROCESS_STREAM_MODE` | Process thinking trace mode: `reasoning` (default), `text`, `both`, or `off`. | `reasoning` |
-| `OPENAI_PROCESS_MAX_TOOL_CHARS` | Max character limit for tool execution summary in process stream. | `400` |
-| `OPENAI_SSE_KEEPALIVE_SECONDS` | SSE keepalive interval in seconds (default: 15, set <= 0 to disable). | `15` |
-| `OPENAI_SSE_KEEPALIVE_STYLE` | SSE keepalive format: `comment` (`: keepalive\n\n`) or `empty_delta`. | `comment` |
-| `LOG_LEVEL` | Log verbosity level: `DEBUG`, `INFO` (default), `WARNING`, `ERROR`. | `INFO` |
-| `CHAT_HISTORY_DB_URI` | Optional MySQL connection string for thread checkpointer. | `mysql+pymysql://user:pass@localhost:3306/db` |
-| `MCP_CONFIG_DIR` | Optional directory containing external MCP JSON configs. | `./mcp_configs` |
+| `PROJECT_PATH` | Path to the prepared Wren AI semantic project directory (containing `.wren`). | `/project` or `./wren_project` |
+| `PORT` | Listening port for Track B FastAPI / OpenAI Proxy server (`/v1/*` & `/chat*`). | `8201` |
+| `MCP_HOST` | Host binding for Track A FastMCP SSE Server. | `0.0.0.0` |
+| `MCP_PORT` | Listening port for Track A FastMCP SSE Server. | `8202` |
+
+### 2. Upstream LLM Configuration
+| Variable | Description | Default / Example |
+|---|---|---|
+| `OPENAI_API_KEY` | API Key for upstream LLM used by LangGraph agent logic. | `sk-proj-...` |
+| `LLM_API_BASE` / `OPENAI_API_BASE` | Base URL for LLM service (supports vLLM, Ollama, OneAPI, DeepSeek, etc.). | `http://192.168.110.209:8200/v1` |
+| `LLM_MODEL_NAME` | Model name passed to the upstream LLM provider. | `gpt-4o` or `Qwen3.6-27B` |
+
+### 3. Track B OpenAI Adapter & Thinking Stream
+| Variable | Description | Default / Example |
+|---|---|---|
+| `OPENAI_EXPOSED_MODELS` | Virtual model IDs returned by `GET /v1/models` (comma-separated). | `wren-agent,wren-semantic-analyst` |
+| `OPENAI_PROCESS_STREAM_MODE` | ReAct reasoning & tool execution trace mode: `reasoning` (default, emits `delta.reasoning_content` for UI thinking trace), `text` (inline), `both`, or `off`. | `reasoning` |
+| `OPENAI_PROCESS_MAX_TOOL_CHARS` | Character truncation limit for tool execution summary in thinking trace. | `400` |
+
+### 4. SSE Stream Keepalive (Prevent Client Idle Timeout)
+| Variable | Description | Default / Example |
+|---|---|---|
+| `OPENAI_SSE_KEEPALIVE_SECONDS` | Heartbeat interval in seconds during long tool/LLM inference windows (`<=0` to disable). | `15` |
+| `OPENAI_SSE_KEEPALIVE_STYLE` | Heartbeat byte format: `comment` (`: keepalive\n\n`, zero UI noise) or `empty_delta` (`delta: {}`). | `comment` |
+
+### 5. Diagnostics & Persistence
+| Variable | Description | Default / Example |
+|---|---|---|
+| `LOG_LEVEL` | Application logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`). | `INFO` |
+| `CHAT_HISTORY_DB_URI` | Connection URI for persistent MySQL checkpointer (`mysql+pymysql://...`). Defaults to `MemorySaver`. | `mysql+pymysql://root:pass@host:3306/db` |
+| `MCP_CONFIG_DIR` | Directory containing JSON definition files for external MCP servers. | `./mcp_configs` |
+
+### 6. Automatic Data Source Profile Setup (`entrypoint.sh`)
+| Variable | Description | Default / Example |
+|---|---|---|
+| `ACTIVE_PROFILE` | Name of the active profile generated in `.wren/profiles.yml`. | `default` |
+| `DATASOURCE` | Data source type (`mysql`, `postgres`, `duckdb`, `bigquery`, etc.). | `mysql` |
+| `DB_HOST` / `DB_PORT` | Target database hostname and port. | `127.0.0.1:3306` |
+| `DB_NAME` / `DB_USER` / `DB_PASSWORD` | Database credentials and target database name. | `root` / `secret` |
+| `SSL_MODE` | Database SSL connection mode (`DISABLED`, `REQUIRED`, etc.). | `DISABLED` |
 
 ---
 
