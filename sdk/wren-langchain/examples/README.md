@@ -71,6 +71,8 @@ Configure the services via environment variables:
 | `OPENAI_EXPOSED_MODELS` | Virtual model IDs returned by `GET /v1/models`. | `wren-agent,wren-semantic-analyst` |
 | `OPENAI_PROCESS_STREAM_MODE` | Process thinking trace mode: `reasoning` (default), `text`, `both`, or `off`. | `reasoning` |
 | `OPENAI_PROCESS_MAX_TOOL_CHARS` | Max character limit for tool execution summary in process stream. | `400` |
+| `OPENAI_SSE_KEEPALIVE_SECONDS` | SSE keepalive interval in seconds (default: 15, set <= 0 to disable). | `15` |
+| `OPENAI_SSE_KEEPALIVE_STYLE` | SSE keepalive format: `comment` (`: keepalive\n\n`) or `empty_delta`. | `comment` |
 | `CHAT_HISTORY_DB_URI` | Optional MySQL connection string for thread checkpointer. | `mysql+pymysql://user:pass@localhost:3306/db` |
 | `MCP_CONFIG_DIR` | Optional directory containing external MCP JSON configs. | `./mcp_configs` |
 

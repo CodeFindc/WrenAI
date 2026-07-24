@@ -1231,6 +1231,20 @@ def get_openai_process_max_tool_chars() -> int:
     except ValueError:
         return 400
 
+def get_openai_sse_keepalive_seconds() -> float:
+    """Get SSE keepalive interval in seconds. Defaults to 15.0. Set <= 0 to disable."""
+    try:
+        return float(os.getenv("OPENAI_SSE_KEEPALIVE_SECONDS", "15.0"))
+    except ValueError:
+        return 15.0
+
+def get_openai_sse_keepalive_style() -> str:
+    """Get SSE keepalive style: 'comment' (default, ': keepalive\n\n') or 'empty_delta'."""
+    val = os.getenv("OPENAI_SSE_KEEPALIVE_STYLE", "comment").strip().lower()
+    if val in ("comment", "empty_delta"):
+        return val
+    return "comment"
+
 def sanitize_and_truncate_text(text: Any, max_chars: int = 400) -> str:
     """Sanitize sensitive keywords and truncate text to max_chars."""
     if not text:
@@ -1285,6 +1299,12 @@ def make_chat_chunk(completion_id: str, model: str, created_ts: int, delta: dict
         ]
     }
     return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+def make_sse_keepalive_chunk(completion_id: str, model: str, created_ts: int, style: str) -> str:
+    """Generate an SSE keepalive byte stream (either a comment line or an empty delta chunk)."""
+    if style == "empty_delta":
+        return make_chat_chunk(completion_id, model, created_ts, {})
+    return ": keepalive\n\n"
 
 
 @app.post("/v1/chat/completions")
@@ -1397,9 +1417,20 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
                 chunks.append(make_chat_chunk(completion_id, request.model, created_ts, {"content": f"_{trace_text}_\n\n"}))
             return chunks
 
+        keepalive_s = get_openai_sse_keepalive_seconds()
+        keepalive_style = get_openai_sse_keepalive_style()
+
         try:
             while True:
-                item_type, item_data = await stream_queue.get()
+                try:
+                    if keepalive_s > 0:
+                        item_type, item_data = await asyncio.wait_for(stream_queue.get(), timeout=keepalive_s)
+                    else:
+                        item_type, item_data = await stream_queue.get()
+                except asyncio.TimeoutError:
+                    yield make_sse_keepalive_chunk(completion_id, request.model, created_ts, keepalive_style)
+                    continue
+
                 if item_type == "end":
                     break
                 elif item_type == "error":
