@@ -30,6 +30,13 @@ services:
       - LLM_API_KEY=${LLM_API_KEY:-}
       - LLM_MODEL_NAME=${LLM_MODEL_NAME:-gpt-4o}
 
+      # OpenAI Process Stream & SSE Keepalive Configurations
+      - OPENAI_EXPOSED_MODELS=${OPENAI_EXPOSED_MODELS:-wren-agent,wren-semantic-analyst}
+      - OPENAI_PROCESS_STREAM_MODE=${OPENAI_PROCESS_STREAM_MODE:-reasoning}
+      - OPENAI_PROCESS_MAX_TOOL_CHARS=${OPENAI_PROCESS_MAX_TOOL_CHARS:-400}
+      - OPENAI_SSE_KEEPALIVE_SECONDS=${OPENAI_SSE_KEEPALIVE_SECONDS:-15}
+      - OPENAI_SSE_KEEPALIVE_STYLE=${OPENAI_SSE_KEEPALIVE_STYLE:-comment}
+
       # DB Connection string for LangGraph persistent session history checkpointer
       # If not set, server defaults to in-memory checkpointer.
       - CHAT_HISTORY_DB_URI=${CHAT_HISTORY_DB_URI:-}

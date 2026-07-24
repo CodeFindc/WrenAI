@@ -167,4 +167,23 @@ curl -X POST http://localhost:8201/v1/chat/completions \
 - **Swagger UI**: `http://localhost:8201/docs`
 - **Native Chat API**: `POST /chat`
 - **Native Stream API**: `POST /chat/stream`
+
+---
+
+## Troubleshooting Reverse Proxies & Streaming Interruption
+
+If UI clients (such as DEEIX-Chat) report streaming interruptions during long-running tool queries:
+
+1. **Proxy Buffering**: Ensure reverse proxies (Nginx / Ingress / Traefik) do not buffer SSE streams (`X-Accel-Buffering: no` is set by default in responses).
+2. **Comment Stripping**: If proxies strip SSE comment lines (`: keepalive\n\n`), switch to empty delta chunks by setting:
+   ```bash
+   OPENAI_SSE_KEEPALIVE_STYLE=empty_delta
+   ```
+3. **Verify Keepalive with cURL**:
+   ```bash
+   curl -N -X POST http://localhost:8201/v1/chat/completions \
+     -H "Content-Type: application/json" \
+     -d '{"model":"wren-agent","messages":[{"role":"user","content":"Run complex query"}],"stream":true}'
+   ```
+   Look for periodic `: keepalive` ping comments every 15 seconds during long inference windows.
 - **History Retrieval**: `GET /chat/history/{session_id}`

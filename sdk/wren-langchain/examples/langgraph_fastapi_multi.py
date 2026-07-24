@@ -1405,9 +1405,9 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
         astream_task = asyncio.create_task(run_astream())
         yielded_any_content = False
         fallback_tool_content = ""
+        keepalive_count = 0
 
         def emit_process_trace(trace_text: str):
-            nonlocal yielded_any_content
             if not trace_text or stream_mode == "off":
                 return []
             chunks = []
@@ -1428,12 +1428,16 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
                     else:
                         item_type, item_data = await stream_queue.get()
                 except asyncio.TimeoutError:
+                    keepalive_count += 1
+                    if keepalive_count == 1 or keepalive_count % 4 == 0:
+                        print(f"[SSE KEEPALIVE] Sent keepalive ping #{keepalive_count} for request {completion_id} (style: {keepalive_style})", flush=True)
                     yield make_sse_keepalive_chunk(completion_id, request.model, created_ts, keepalive_style)
                     continue
 
                 if item_type == "end":
                     break
                 elif item_type == "error":
+                    print(f"[SSE STREAM ERROR] Exception during stream for {completion_id}: {item_data}", flush=True)
                     yield make_chat_chunk(completion_id, request.model, created_ts, {"content": f"\n[执行异常: {item_data}]"})
                     break
                 elif item_type == "progress":
@@ -1470,11 +1474,22 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
         finally:
             if not astream_task.done():
                 astream_task.cancel()
+                import contextlib
+                with contextlib.suppress(asyncio.CancelledError):
+                    await astream_task
 
         yield make_chat_chunk(completion_id, request.model, created_ts, {}, finish_reason="stop")
         yield "data: [DONE]\n\n"
 
-    return StreamingResponse(event_stream_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_stream_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
 
 
 
