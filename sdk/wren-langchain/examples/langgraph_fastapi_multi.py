@@ -1196,25 +1196,74 @@ async def list_openai_models():
     }
 
 
-def convert_openai_messages(messages: list[OpenAIMessage]) -> list[BaseMessage]:
-    """Convert a list of OpenAI API format messages into LangChain BaseMessage objects."""
-    lc_messages = []
-    for msg in messages:
-        content = msg.content or ""
-        if isinstance(content, list):
-            parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
-            content = " ".join(parts)
-            
-        role = msg.role.lower()
-        if role == "user":
-            lc_messages.append(HumanMessage(content=content))
-        elif role == "assistant":
-            lc_messages.append(AIMessage(content=content))
-        elif role == "system":
-            lc_messages.append(SystemMessage(content=content))
-        elif role == "tool":
-            lc_messages.append(ToolMessage(content=content, tool_call_id=msg.tool_call_id or "tool_call"))
-    return lc_messages
+def get_openai_process_stream_mode() -> str:
+    """Get the OpenAI process streaming mode: 'off' | 'text' | 'reasoning' | 'both'. Defaults to 'reasoning'."""
+    val = os.getenv("OPENAI_PROCESS_STREAM_MODE", "reasoning").strip().lower()
+    if val in ("off", "text", "reasoning", "both"):
+        return val
+    return "reasoning"
+
+def get_openai_process_max_tool_chars() -> int:
+    """Get the maximum character limit for tool execution summary in process stream."""
+    try:
+        return int(os.getenv("OPENAI_PROCESS_MAX_TOOL_CHARS", "400"))
+    except ValueError:
+        return 400
+
+def sanitize_and_truncate_text(text: Any, max_chars: int = 400) -> str:
+    """Sanitize sensitive keywords and truncate text to max_chars."""
+    if not text:
+        return ""
+    sanitized = str(text)
+    for kw in ["password", "secret", "api_key", "token", "access_key"]:
+        if kw in sanitized.lower():
+            import re
+            sanitized = re.sub(rf"('{kw}'|\"{kw}\"|{kw})\s*[:=]\s*['\"]?[^'\";\s]+['\"]?", r"\1: ***", sanitized, flags=re.IGNORECASE)
+    if len(sanitized) > max_chars:
+        return sanitized[:max_chars] + f"... [truncated {len(sanitized)} chars]"
+    return sanitized
+
+def format_process_tool_start(tool_calls: list) -> str:
+    """Format tool call intentions into human-readable thinking trace."""
+    traces = []
+    for tc in tool_calls:
+        name = tc.get("name", "unknown_tool") if isinstance(tc, dict) else getattr(tc, "name", "unknown_tool")
+        args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+        args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
+        args_str = sanitize_and_truncate_text(args_str, 150)
+        traces.append(f"🔧 [Wren Agent] 准备执行工具 `{name}` (参数: {args_str})")
+    return "\n".join(traces)
+
+def format_process_tool_result(tool_msg: ToolMessage, max_chars: int = 400) -> str:
+    """Format tool execution result into thinking trace summary."""
+    name = getattr(tool_msg, "name", "tool")
+    content = str(tool_msg.content or "")
+    summary = sanitize_and_truncate_text(content, max_chars)
+    return f"⚡ [Wren Agent] 工具 `{name}` 执行完成，结果摘要:\n{summary}"
+
+def format_process_progress(event: dict) -> str:
+    """Format MCP or internal progress event into thinking trace."""
+    msg = event.get("message", "")
+    detail = event.get("detail", "")
+    text = f"{msg}: {detail}" if detail else msg
+    return f"⏳ [Wren Progress] {sanitize_and_truncate_text(text, 200)}"
+
+def make_chat_chunk(completion_id: str, model: str, created_ts: int, delta: dict, finish_reason: str | None = None) -> str:
+    """Helper to generate standard OpenAI SSE chat completion chunk string."""
+    chunk = {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": created_ts,
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "delta": delta,
+                "finish_reason": finish_reason
+            }
+        ]
+    }
+    return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
 
 @app.post("/v1/chat/completions")
@@ -1233,19 +1282,28 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
     created_ts = int(datetime.datetime.now().timestamp())
     graph_input = {"messages": input_messages}
+    
+    stream_mode = get_openai_process_stream_mode()
+    max_tool_chars = get_openai_process_max_tool_chars()
 
     if not request.stream:
         try:
             final_state = await langgraph_app_stateless.ainvoke(graph_input)
             final_content = ""
+            reasoning_traces = []
+
             if "messages" in final_state and final_state["messages"]:
-                # Prefer the last non-empty AIMessage content
-                for m in reversed(final_state["messages"]):
-                    content = getattr(m, "content", "")
-                    if isinstance(m, AIMessage) and content and isinstance(content, str) and content.strip():
-                        final_content = content.strip()
-                        break
-                # Fallback to last non-empty ToolMessage content if no AIMessage text is found
+                for m in final_state["messages"]:
+                    if isinstance(m, AIMessage):
+                        tool_calls = getattr(m, "tool_calls", None)
+                        if tool_calls:
+                            reasoning_traces.append(format_process_tool_start(tool_calls))
+                        content = getattr(m, "content", "")
+                        if content and isinstance(content, str) and content.strip():
+                            final_content = content.strip()
+                    elif isinstance(m, ToolMessage):
+                        reasoning_traces.append(format_process_tool_result(m, max_tool_chars))
+
                 if not final_content:
                     for m in reversed(final_state["messages"]):
                         content = getattr(m, "content", "")
@@ -1256,6 +1314,13 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
             if not final_content:
                 final_content = "服务已收到您的消息。目前数据库或工具链尚无返回结果，请检查目标数据库连接及配置文件。"
 
+            msg_payload = {
+                "role": "assistant",
+                "content": final_content
+            }
+            if stream_mode in ("reasoning", "both") and reasoning_traces:
+                msg_payload["reasoning_content"] = "\n\n".join(reasoning_traces)
+
             return {
                 "id": completion_id,
                 "object": "chat.completion",
@@ -1264,10 +1329,7 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
                 "choices": [
                     {
                         "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": final_content
-                        },
+                        "message": msg_payload,
                         "finish_reason": "stop"
                     }
                 ],
@@ -1284,101 +1346,80 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
 
     # Streaming mode (SSE)
     async def event_stream_generator():
-        initial_chunk = {
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "created": created_ts,
-            "model": request.model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {"role": "assistant"},
-                    "finish_reason": None
-                }
-            ]
-        }
-        yield f"data: {json.dumps(initial_chunk, ensure_ascii=False)}\n\n"
+        # Initial chunk specifying assistant role
+        yield make_chat_chunk(completion_id, request.model, created_ts, {"role": "assistant"})
 
+        stream_queue = asyncio.Queue()
+        config = {"configurable": {"stream_queue": stream_queue}}
+
+        async def run_astream():
+            try:
+                async for event in langgraph_app_stateless.astream(graph_input, config=config, stream_mode="updates"):
+                    await stream_queue.put(("graph", event))
+            except Exception as err:
+                await stream_queue.put(("error", err))
+            finally:
+                await stream_queue.put(("end", None))
+
+        astream_task = asyncio.create_task(run_astream())
         yielded_any_content = False
         fallback_tool_content = ""
 
-        try:
-            async for event in langgraph_app_stateless.astream(
-                graph_input,
-                stream_mode="updates"
-            ):
-                for node_name, update in event.items():
-                    msgs = update.get("messages", [])
-                    for msg in msgs:
-                        content = getattr(msg, "content", "")
-                        if content and isinstance(content, str) and content.strip():
-                            if isinstance(msg, ToolMessage):
-                                fallback_tool_content = content.strip()
-                            elif isinstance(msg, AIMessage):
-                                delta_chunk = {
-                                    "id": completion_id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created_ts,
-                                    "model": request.model,
-                                    "choices": [
-                                        {
-                                            "index": 0,
-                                            "delta": {"content": content},
-                                            "finish_reason": None
-                                        }
-                                    ]
-                                }
-                                yield f"data: {json.dumps(delta_chunk, ensure_ascii=False)}\n\n"
-                                yielded_any_content = True
+        def emit_process_trace(trace_text: str):
+            nonlocal yielded_any_content
+            if not trace_text or stream_mode == "off":
+                return []
+            chunks = []
+            if stream_mode in ("reasoning", "both"):
+                chunks.append(make_chat_chunk(completion_id, request.model, created_ts, {"reasoning_content": trace_text + "\n\n"}))
+            if stream_mode in ("text", "both"):
+                chunks.append(make_chat_chunk(completion_id, request.model, created_ts, {"content": f"_{trace_text}_\n\n"}))
+            return chunks
 
-            # If model triggered tools but didn't generate final AIMessage text, yield tool content or fallback notice
+        try:
+            while True:
+                item_type, item_data = await stream_queue.get()
+                if item_type == "end":
+                    break
+                elif item_type == "error":
+                    yield make_chat_chunk(completion_id, request.model, created_ts, {"content": f"\n[执行异常: {item_data}]"})
+                    break
+                elif item_type == "progress":
+                    trace_str = format_process_progress(item_data)
+                    for chk in emit_process_trace(trace_str):
+                        yield chk
+                elif item_type == "graph":
+                    for node_name, update in item_data.items():
+                        msgs = update.get("messages", [])
+                        for msg in msgs:
+                            if isinstance(msg, AIMessage):
+                                tool_calls = getattr(msg, "tool_calls", None)
+                                if tool_calls:
+                                    trace_str = format_process_tool_start(tool_calls)
+                                    for chk in emit_process_trace(trace_str):
+                                        yield chk
+                                
+                                content = getattr(msg, "content", "")
+                                if content and isinstance(content, str) and content.strip():
+                                    yield make_chat_chunk(completion_id, request.model, created_ts, {"content": content})
+                                    yielded_any_content = True
+                            elif isinstance(msg, ToolMessage):
+                                trace_str = format_process_tool_result(msg, max_tool_chars)
+                                for chk in emit_process_trace(trace_str):
+                                    yield chk
+                                content = getattr(msg, "content", "")
+                                if content and isinstance(content, str) and content.strip():
+                                    fallback_tool_content = content.strip()
+
             if not yielded_any_content:
                 out_text = fallback_tool_content or "服务已成功接收您的问答。由于目标数据库或大模型工具未返回文本内容，请确认数据库状态。"
-                fallback_chunk = {
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_ts,
-                    "model": request.model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": out_text},
-                            "finish_reason": None
-                        }
-                    ]
-                }
-                yield f"data: {json.dumps(fallback_chunk, ensure_ascii=False)}\n\n"
+                yield make_chat_chunk(completion_id, request.model, created_ts, {"content": out_text})
 
-        except Exception as err:
-            err_chunk = {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": created_ts,
-                "model": request.model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"content": f"\n[执行异常: {err}]"},
-                        "finish_reason": None
-                    }
-                ]
-            }
-            yield f"data: {json.dumps(err_chunk, ensure_ascii=False)}\n\n"
+        finally:
+            if not astream_task.done():
+                astream_task.cancel()
 
-        stop_chunk = {
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "created": created_ts,
-            "model": request.model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": "stop"
-                }
-            ]
-        }
-        yield f"data: {json.dumps(stop_chunk, ensure_ascii=False)}\n\n"
+        yield make_chat_chunk(completion_id, request.model, created_ts, {}, finish_reason="stop")
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream_generator(), media_type="text/event-stream")

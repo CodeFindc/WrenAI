@@ -67,7 +67,10 @@ Configure the services via environment variables:
 | `MCP_PORT` | Port for Track A FastMCP SSE server. | `8202` |
 | `OPENAI_API_KEY` | API Key for upstream LLM used by LangGraph. | `sk-proj-...` |
 | `LLM_API_BASE` | Custom base URL for LLM service (e.g., vLLM, Ollama, OneAPI). | `http://localhost:8000/v1` |
-| `LLM_MODEL_NAME` | Model name override. | `gpt-4o` |
+| `LLM_MODEL_NAME` | Model name override for upstream LLM. | `gpt-4o` |
+| `OPENAI_EXPOSED_MODELS` | Virtual model IDs returned by `GET /v1/models`. | `wren-agent,wren-semantic-analyst` |
+| `OPENAI_PROCESS_STREAM_MODE` | Process thinking trace mode: `reasoning` (default), `text`, `both`, or `off`. | `reasoning` |
+| `OPENAI_PROCESS_MAX_TOOL_CHARS` | Max character limit for tool execution summary in process stream. | `400` |
 | `CHAT_HISTORY_DB_URI` | Optional MySQL connection string for thread checkpointer. | `mysql+pymysql://user:pass@localhost:3306/db` |
 | `MCP_CONFIG_DIR` | Optional directory containing external MCP JSON configs. | `./mcp_configs` |
 
