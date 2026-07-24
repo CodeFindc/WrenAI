@@ -1196,6 +1196,27 @@ async def list_openai_models():
     }
 
 
+def convert_openai_messages(messages: list[OpenAIMessage]) -> list[BaseMessage]:
+    """Convert a list of OpenAI API format messages into LangChain BaseMessage objects."""
+    lc_messages = []
+    for msg in messages:
+        content = msg.content or ""
+        if isinstance(content, list):
+            parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+            content = " ".join(parts)
+            
+        role = msg.role.lower()
+        if role == "user":
+            lc_messages.append(HumanMessage(content=content))
+        elif role == "assistant":
+            lc_messages.append(AIMessage(content=content))
+        elif role == "system":
+            lc_messages.append(SystemMessage(content=content))
+        elif role == "tool":
+            lc_messages.append(ToolMessage(content=content, tool_call_id=msg.tool_call_id or "tool_call"))
+    return lc_messages
+
+
 def get_openai_process_stream_mode() -> str:
     """Get the OpenAI process streaming mode: 'off' | 'text' | 'reasoning' | 'both'. Defaults to 'reasoning'."""
     val = os.getenv("OPENAI_PROCESS_STREAM_MODE", "reasoning").strip().lower()
