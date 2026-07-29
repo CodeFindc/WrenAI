@@ -1,6 +1,6 @@
 # Wren LangGraph Stateful API Server & Dual-Track Integration
 
-This directory contains production-ready code demonstrating how to wrap a Wren AI semantic layer project inside a **stateful, multi-turn LangGraph Agent API Server** (with OpenAI compatibility) and a **FastMCP SSE Server** for seamless integration with AI platforms like **DEEIX-Chat**.
+This directory contains production-ready code demonstrating how to wrap a Wren AI semantic layer project inside a **stateful, multi-turn LangGraph Agent API Server** (with OpenAI compatibility) and a **FastMCP dual-transport Server** (classic SSE + Streamable HTTP) for seamless integration with AI platforms like **DEEIX-Chat**.
 
 ---
 
@@ -18,10 +18,10 @@ This directory contains production-ready code demonstrating how to wrap a Wren A
        DEEIX-Chat / Client as MCP Client                  DEEIX-Chat / Client as Upstream Client
   (LLM ReAct over wren_query / dry_plan / …)             (Select "wren-agent" from model list)
                       │                                                 │
-                      ▼ (Port 8202 - FastMCP SSE)                       ▼ (Port 8201 - OpenAI /v1 Protocol)
+                      ▼ (Port 8202 - SSE /sse + Streamable HTTP /mcp)   ▼ (Port 8201 - OpenAI /v1 Protocol)
         ┌────────────────────────┐                        ┌────────────────────────┐
         │   wren_mcp_server.py   │                        │langgraph_fastapi_multi │
-        │  (FastMCP SSE Server)  │                        │ (/v1/chat/completions) │
+        │  (FastMCP dual xport)  │                        │ (/v1/chat/completions) │
         └───────────┬────────────┘                        └───────────┬────────────┘
                     │                                                 │
                     └────────────────────────┬────────────────────────┘
@@ -36,8 +36,8 @@ This directory contains production-ready code demonstrating how to wrap a Wren A
 
 ## Features
 
-1. **Track A: FastMCP SSE Server (Port 8202)**:
-   - Exposes real WrenToolkit tools (`wren_query`, `wren_dry_plan`, `wren_list_models`, optional memory tools, plus `wren_get_system_prompt`) over Model Context Protocol (MCP) using SSE transport.
+1. **Track A: FastMCP dual-transport Server (Port 8202)**:
+   - Exposes real WrenToolkit tools (`wren_query`, `wren_dry_plan`, `wren_list_models`, optional memory tools, plus `wren_get_system_prompt`) over Model Context Protocol (MCP) on **both** classic SSE (`/sse`) and Streamable HTTP (`/mcp`, what DEEIX-Chat speaks).
    - Platform LLMs (GPT-4o, Claude, DeepSeek, etc.) run their own ReAct loop: list/fetch context → write SQL → dry_plan → query. Track A is **not** an NL2SQL black box (use Track B for that).
 
 2. **Track B: OpenAI API Compatible Adapter (Port 8201)**:
@@ -59,15 +59,17 @@ This directory contains production-ready code demonstrating how to wrap a Wren A
 
 ## Environment Variables Reference
 
-The Dual-Track services (FastMCP SSE and OpenAI-compatible API) can be fully customized via environment variables:
+The Dual-Track services (FastMCP dual-transport MCP and OpenAI-compatible API) can be fully customized via environment variables:
 
 ### 1. Core Services & Network Binding
 | Variable | Description | Default / Example |
 |---|---|---|
 | `PROJECT_PATH` | Path to the prepared Wren AI semantic project directory (containing `.wren`). | `/project` or `./wren_project` |
 | `PORT` | Listening port for Track B FastAPI / OpenAI Proxy server (`/v1/*` & `/chat*`). | `8201` |
-| `MCP_HOST` | Host binding for Track A FastMCP SSE Server. | `0.0.0.0` |
-| `MCP_PORT` | Listening port for Track A FastMCP SSE Server. | `8202` |
+| `MCP_HOST` | Host binding for Track A FastMCP dual-transport server. | `0.0.0.0` |
+| `MCP_PORT` | Listening port for Track A FastMCP dual-transport server. | `8202` |
+| `MCP_SSE_PATH` | Classic MCP SSE endpoint path. | `/sse` |
+| `MCP_STREAMABLE_HTTP_PATH` | Streamable HTTP JSON-RPC endpoint path (DEEIX `baseURL`). | `/mcp` |
 
 ### 2. Upstream LLM Configuration
 | Variable | Description | Default / Example |
@@ -152,7 +154,8 @@ docker-compose -f docker-compose.cn.yaml up -d
 *(Uses Tsinghua APT mirror, npmmirror registry, PyPI Tsinghua mirror, and GitHub proxy for ultra-fast build in Mainland China)*
 
 - **Track B (OpenAI Proxy & API)**: `http://localhost:8201/v1`
-- **Track A (FastMCP SSE Server)**: `http://localhost:8202/sse`
+- **Track A MCP SSE**: `http://localhost:8202/sse`
+- **Track A MCP Streamable HTTP (DEEIX)**: `http://localhost:8202/mcp`
 
 ### Option 2: Windows Batch Script (Local Development)
 
@@ -170,12 +173,40 @@ python start_dual_services.py
 
 ## API Endpoints & Usage
 
-### Track A: FastMCP SSE Endpoint (`http://localhost:8202/sse`)
+### Track A: FastMCP dual transport (port 8202)
 
-Test SSE connection:
+| Transport | URL | Clients |
+|---|---|---|
+| Classic SSE | `http://localhost:8202/sse` (+ POST `/messages/`) | Claude Desktop / older MCP clients |
+| **Streamable HTTP** | `http://localhost:8202/mcp` | **DEEIX-Chat** (JSON-RPC POST; Accept: `application/json, text/event-stream`) |
+| Health | `http://localhost:8202/health` | Ops / readiness |
+
+Test connectivity:
 ```bash
+# Health (both transports advertised)
+curl http://localhost:8202/health
+
+# Classic SSE (long-lived; Ctrl-C to stop)
 curl -N http://localhost:8202/sse
+
+# Streamable HTTP — MCP initialize (what DEEIX does first)
+curl -s -X POST http://localhost:8202/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
 ```
+
+**DEEIX-Chat MCP registration** (Admin → MCP servers):
+```json
+{
+  "name": "wren-semantic",
+  "baseURL": "http://<wren-host>:8202/mcp",
+  "authToken": "",
+  "headersJSON": "{}",
+  "status": "active"
+}
+```
+Then sync tools and enable `wren_query` / `wren_list_models` / … on the chat. Do **not** also select `wren-agent` (Track B) in the same turn — that would double-agent.
 
 Available Tools in FastMCP (mirrors `WrenToolkit.get_tools()` + meta helper):
 

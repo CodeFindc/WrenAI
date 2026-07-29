@@ -379,15 +379,16 @@ echo.
 :: ── 10. Start Dual-Track Services ────────────────────────────────────────────
 echo [10/10] Starting Dual-Track WrenAI Services ...
 echo.
-echo      ^> Track A (FastMCP SSE): http://0.0.0.0:8202/sse
+echo      ^> Track A MCP SSE:             http://0.0.0.0:8202/sse
+echo      ^> Track A MCP Streamable HTTP: http://0.0.0.0:8202/mcp  (DEEIX)
 echo      ^> Track B (OpenAI Proxy & API): http://0.0.0.0:8201/v1
 echo      ^> PROJECT_PATH=%PROJECT_DIR%
 echo.
 
 set "PROJECT_PATH=%PROJECT_DIR%"
 
-echo Starting Track A: FastMCP SSE Server (Port 8202) ...
-start "Wren FastMCP SSE Server" /B python wren_mcp_server.py
+echo Starting Track A: FastMCP dual-transport Server (Port 8202, /sse + /mcp) ...
+start "Wren FastMCP Server" /B python wren_mcp_server.py
 
 echo Starting Track B: OpenAI API Adapter & FastAPI Server (Port 8201) ...
 python langgraph_fastapi_multi.py

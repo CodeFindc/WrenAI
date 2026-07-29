@@ -7,7 +7,7 @@ services:
       dockerfile: sdk/wren-langchain/examples/Dockerfile.cn
     ports:
       - "8201:8201" # Track B: OpenAI API Adapter & Stateful FastAPI Server
-      - "8202:8202" # Track A: FastMCP SSE Server Adapter
+      - "8202:8202" # Track A: FastMCP dual transport (SSE /sse + Streamable HTTP /mcp)
     environment:
       # Dual-Track Server Ports & Unbuffered Logging
       - PYTHONUNBUFFERED=1

@@ -77,16 +77,16 @@ wren-engine（wren-core 的 Python 包：语义引擎本体）
    ╔═══════════════════════════╗ Track B                        ╔══════════════════════════╗ Track A
    ║ langgraph_fastapi_multi.py ║ 端口 8201                     ║   wren_mcp_server.py     ║ 端口 8202
    ║───────────────────────────║                                ║─────────────────────────║
-   ║ GET  /                    ║ ← React UI(wren-chat-ui)       ║ FastMCP SSE  /sse        ║ ← MCP 客户端
-   ║ POST /chat, /chat/stream  ║ ← 原生会话(NDJSON)             ║  wren_query / dry_plan   ║
-   ║ POST /v1/chat/completions ║ ← OpenAI 协议客户端(DEEIX 等)  ║  wren_list_models        ║
-   ║ GET  /v1/models,/health   ║                                ║  + memory tools + prompt ║
-   ║ GET  /docs,/static/*      ║                                ║  mcp.run(transport=sse)  ║
+   ║ GET  /                    ║ ← React UI(wren-chat-ui)       ║ FastMCP dual transport   ║ ← MCP 客户端
+   ║ POST /chat, /chat/stream  ║ ← 原生会话(NDJSON)             ║  GET  /sse  (classic SSE) ║
+   ║ POST /v1/chat/completions ║ ← OpenAI 协议客户端(DEEIX 等)  ║  *    /mcp  (Streamable)  ║ ← DEEIX
+   ║ GET  /v1/models,/health   ║                                ║  wren_query / dry_plan /  ║
+   ║ GET  /docs,/static/*      ║                                ║  list_models + memory    ║
    ╚═══════════════════════════╝                                ╚══════════════════════════╝
 ```
 
 - **Track B（端口 8201，`langgraph_fastapi_multi.py`）**：同时承载原生 Wren 会话 API（有状态）与 OpenAI 兼容 API（无状态），并托管聊天 UI、Swagger 文档、静态资源。
-- **Track A（端口 8202，`wren_mcp_server.py`）**：FastMCP SSE 服务，把同一 toolkit 包装成 3 个 MCP 工具，供 MCP 客户端（如 DEEIX-Chat 插件）调用。
+- **Track A（端口 8202，`wren_mcp_server.py`）**：FastMCP **双传输**服务（经典 SSE `/sse` + Streamable HTTP `/mcp` 同端口并存），把同一 toolkit 包装成真实 MCP 工具，供 MCP 客户端（如 DEEIX-Chat）调用。DEEIX 仅支持 Streamable HTTP，应配置 `baseURL=…:8202/mcp`。
 - 两条轨道**不在进程内互通**，各自独立实例化 `WrenToolkit`；它们是"同一语义层的两种暴露方式"。
 
 ---
@@ -174,7 +174,15 @@ wren-engine（wren-core 的 Python 包：语义引擎本体）
 
 ### 3.3 Track A：`wren_mcp_server.py`
 
-`FastMCP`（`mcp` 包）SSE 服务，默认端口 8202（`MCP_HOST`/`MCP_PORT`/`HOST`/`PORT` 可配）。延迟实例化 `WrenToolkit.from_project(PROJECT_PATH)`，把 **真实** `toolkit.get_tools()` 工具一对一暴露为 MCP tools（方案 C），由上游 LLM 自己做 ReAct——**不再**提供虚假的 NL2SQL 入口 `wren_semantic_query`。
+`FastMCP`（`mcp` 包）**双传输**服务，默认端口 8202（`MCP_HOST`/`MCP_PORT`/`HOST`/`PORT` 可配；路径可由 `MCP_SSE_PATH`/`MCP_STREAMABLE_HTTP_PATH` 覆盖）。延迟实例化 `WrenToolkit.from_project(PROJECT_PATH)`，把 **真实** `toolkit.get_tools()` 工具一对一暴露为 MCP tools（方案 C），由上游 LLM 自己做 ReAct——**不再**提供虚假的 NL2SQL 入口 `wren_semantic_query`。
+
+| 传输 | 路径 | 说明 |
+|---|---|---|
+| Classic SSE | `GET /sse` + `POST /messages/` | 长连接事件流；兼容旧 MCP 客户端 |
+| Streamable HTTP | `POST /mcp`（FastMCP 默认） | JSON-RPC；**DEEIX-Chat 仅支持此传输** |
+| Health | `GET /health` | 返回双传输路径与工具清单 |
+
+实现上合并 `mcp.sse_app()` 与 `mcp.streamable_http_app()` 的路由表到同一个 Starlette `app`，并用 `session_manager.run()` 作为 lifespan（Streamable HTTP 会话任务组必需）。`__main__` 走 `uvicorn.run(app, …)`，**不**再调用 `mcp.run(transport=…)`（后者一次只能启一种传输）。
 
 | MCP 工具 | 实现 |
 |---|---|
@@ -183,7 +191,6 @@ wren-engine（wren-core 的 Python 包：语义引擎本体）
 | `wren_list_models()` | 同上 |
 | `wren_fetch_context` / `wren_recall_queries` / `wren_store_query` | 同上；memory 未启用时返回明确错误（仍注册在 MCP 表面） |
 | `wren_get_system_prompt()` | `toolkit.system_prompt(tools=实际可用工具列表)` |
-| `mcp.run(transport="sse")` / `app = mcp.sse_app()` | 启动；可挂到 Uvicorn |
 
 Track A **不**内嵌 agent，全部经 `WrenToolkit`；NL→SQL 规划属于调用方 LLM。完整黑盒 agent 请用 Track B。
 
@@ -458,7 +465,7 @@ entrypoint.sh（容器启动，8 步）
         │
         ▼
 start_dual_services.py（双进程 + 看门狗）
-  Track A: python wren_mcp_server.py      (8202，崩溃自动重启)
+  Track A: python wren_mcp_server.py      (8202，/sse + /mcp 双传输，崩溃自动重启)
   Track B: python langgraph_fastapi_multi.py (8201，前台；其退出则整体退出)
 ```
 
@@ -671,7 +678,7 @@ ToolNode 分发每个调用到对应 StructuredTool
 | `wren_query` / `wren_dry_plan` / `wren_list_models` | 运行时工具（与 SDK 同名同参） |
 | `wren_fetch_context` / `wren_recall_queries` / `wren_store_query` | 记忆工具（memory 关闭时明确报错） |
 | `wren_get_system_prompt` | 元工具：返回 `toolkit.system_prompt()` |
-| `mcp.sse_app()` / `mcp.run(transport="sse")` | SSE 应用导出 / 直接启动 |
+| `_build_dual_app()` / `app` | 合并 SSE + Streamable HTTP 路由；`uvicorn.run(app)` |
 
 ### 9.3 库侧 `wren-langchain`（`src/wren_langchain/`）
 
@@ -733,7 +740,7 @@ ToolNode 分发每个调用到对应 StructuredTool
 - **checkpointer / thread_id**：LangGraph 的状态持久化机制与键；本示例中 `thread_id = session_id`，键控多轮/多会话。
 - **ReAct**：Reason+Act 循环——LLM 决策调工具→执行→回喂→再决策，至无工具调用结束。
 - **envelope**：工具返回的统一 JSON 结构（`ok/content/data/warnings` 或 `error.{code,phase,message,metadata}`），是工具↔agent 间的契约。
-- **Track A / Track B**：两条对外轨道——A 为 MCP SSE（8202），B 为 OpenAI 兼容 + 原生会话 + UI（8201），收敛到同一语义层。
+- **Track A / Track B**：两条对外轨道——A 为 MCP 双传输（8202：`/sse` + `/mcp`），B 为 OpenAI 兼容 + 原生会话 + UI（8201），收敛到同一语义层。
 - **reasoning trace**：OpenAI SSE 中以 `delta.reasoning_content` 携带的"思考过程"，含工具调用起止/结果/进度的文本化呈现，由 `OPENAI_PROCESS_STREAM_MODE` 控制。
 - **NDJSON**：Newline-Delimited JSON，`/chat/stream` 的传输格式，一行一个节点更新 JSON。
 - **single-file build**：`vite-plugin-singlefile` 把 React 应用编译进单个自包含 `dist/index.html`，无运行时外链，支持离线/气隙。

@@ -1,8 +1,12 @@
-"""FastMCP SSE Server for WrenAI Semantic Layer (Track A).
+"""FastMCP dual-transport server for WrenAI Semantic Layer (Track A).
 
 Exposes the real WrenToolkit LangChain tools over Model Context Protocol (MCP)
-using SSE transport (default port 8202). Upstream MCP clients (DEEIX-Chat,
-Claude, etc.) drive the ReAct loop themselves:
+on a single port (default 8202) with **both** transports coexisting:
+
+    GET  /sse          classic MCP SSE (long-lived event stream + /messages/)
+    *    /mcp          Streamable HTTP JSON-RPC (DEEIX-Chat and modern clients)
+
+Upstream MCP clients drive the ReAct loop themselves:
 
     wren_list_models / wren_fetch_context / wren_recall_queries
       → compose SQL against Wren models
@@ -26,20 +30,35 @@ import asyncio
 import json
 import os
 import sys
-from typing import Any
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator
 
 try:
     from mcp.server.fastmcp import FastMCP
 except ImportError:
     sys.exit("mcp package with FastMCP is required. Run: pip install mcp")
 
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
+
 from wren_langchain import WrenToolkit
 
 # Environment variables
 HOST = os.environ.get("MCP_HOST", os.environ.get("HOST", "0.0.0.0"))
 PORT = int(os.environ.get("MCP_PORT", os.environ.get("PORT", "8202")))
+# FastMCP defaults: sse_path="/sse", message_path="/messages/", streamable_http_path="/mcp"
+SSE_PATH = os.environ.get("MCP_SSE_PATH", "/sse")
+STREAMABLE_HTTP_PATH = os.environ.get("MCP_STREAMABLE_HTTP_PATH", "/mcp")
 
-mcp = FastMCP("WrenAI-Semantic-Layer", host=HOST, port=PORT)
+mcp = FastMCP(
+    "WrenAI-Semantic-Layer",
+    host=HOST,
+    port=PORT,
+    sse_path=SSE_PATH,
+    streamable_http_path=STREAMABLE_HTTP_PATH,
+)
 
 _toolkit: WrenToolkit | None = None
 # Cache of name → LangChain BaseTool from the last successful get_tools() call.
@@ -266,11 +285,74 @@ async def wren_get_system_prompt() -> str:
         return _friendly_error(e)
 
 
-# Expose Starlette SSE app for mounting under Uvicorn if needed
-app = mcp.sse_app()
+# ── Dual-transport ASGI app (SSE + Streamable HTTP on one port) ───────────
+#
+# FastMCP's built-in run(transport=...) only starts ONE transport. DEEIX-Chat
+# speaks Streamable HTTP JSON-RPC (POST /mcp); classic clients still use GET
+# /sse. We merge both route tables from the same FastMCP instance so one
+# Uvicorn process serves both without a second port or process.
+#
+# streamable_http_app() must be built first: it lazily creates the
+# StreamableHTTPSessionManager whose .run() lifespan is required for /mcp.
+
+
+def _build_dual_app() -> Starlette:
+    """Combine SSE (/sse, /messages/) and Streamable HTTP (/mcp) routes."""
+    http_app = mcp.streamable_http_app()  # initializes session_manager
+    sse_app = mcp.sse_app()
+
+    async def health(_request: Request) -> JSONResponse:
+        return JSONResponse(
+            {
+                "status": "ok",
+                "service": "wren-mcp",
+                "transports": {
+                    "sse": SSE_PATH,
+                    "streamable_http": STREAMABLE_HTTP_PATH,
+                    "sse_messages": "/messages/",
+                },
+                "tools": [
+                    "wren_query",
+                    "wren_dry_plan",
+                    "wren_list_models",
+                    "wren_fetch_context",
+                    "wren_recall_queries",
+                    "wren_store_query",
+                    "wren_get_system_prompt",
+                ],
+            }
+        )
+
+    # SSE routes first (GET /sse + Mount /messages/), then /mcp, then health.
+    # Paths do not overlap, so order is only for readability.
+    routes = list(sse_app.routes) + list(http_app.routes) + [
+        Route("/health", endpoint=health, methods=["GET"]),
+    ]
+
+    @asynccontextmanager
+    async def lifespan(_app: Starlette) -> AsyncIterator[None]:
+        # session_manager.run() owns the task group for streamable-http sessions.
+        # Must only be entered once per process (FastMCP enforces this).
+        async with mcp.session_manager.run():
+            yield
+
+    return Starlette(debug=False, routes=routes, lifespan=lifespan)
+
+
+# Expose dual-transport app for Uvicorn (`uvicorn wren_mcp_server:app ...`)
+app = _build_dual_app()
+
 
 if __name__ == "__main__":
-    print(f"Starting FastMCP SSE Server for WrenAI on http://{HOST}:{PORT}/sse ...")
+    import uvicorn
+
+    print(
+        f"Starting FastMCP dual-transport server for WrenAI on "
+        f"http://{HOST}:{PORT} ..."
+    )
+    print(f"  SSE (classic):           http://{HOST}:{PORT}{SSE_PATH}")
+    print(f"  Streamable HTTP (DEEIX): http://{HOST}:{PORT}{STREAMABLE_HTTP_PATH}")
+    print(f"  Health:                  http://{HOST}:{PORT}/health")
     print(
         "MCP tools: wren_query, wren_dry_plan, wren_list_models, "
         "wren_fetch_context, wren_recall_queries, wren_store_query, "
@@ -281,4 +363,9 @@ if __name__ == "__main__":
         "loop. It does NOT accept natural-language questions as SQL. "
         "For a full NL agent use Track B :8201 /v1/chat/completions."
     )
-    mcp.run(transport="sse")
+    print(
+        "DEEIX-Chat MCP config example:\n"
+        f'  {{"name":"wren-semantic","baseURL":"http://<host>:{PORT}{STREAMABLE_HTTP_PATH}"}}'
+    )
+    # Use the merged app (not mcp.run) so both transports stay live.
+    uvicorn.run(app, host=HOST, port=PORT, log_level="info")
