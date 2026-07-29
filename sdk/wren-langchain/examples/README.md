@@ -16,7 +16,7 @@ This directory contains production-ready code demonstrating how to wrap a Wren A
                       ▼                                                 ▼
         【Track A: MCP Plugin Protocol】                    【Track B: OpenAI API Adapter Protocol】
        DEEIX-Chat / Client as MCP Client                  DEEIX-Chat / Client as Upstream Client
-  (Any LLM calls Wren Semantic Tools over MCP)           (Select "wren-agent" from model list)
+  (LLM ReAct over wren_query / dry_plan / …)             (Select "wren-agent" from model list)
                       │                                                 │
                       ▼ (Port 8202 - FastMCP SSE)                       ▼ (Port 8201 - OpenAI /v1 Protocol)
         ┌────────────────────────┐                        ┌────────────────────────┐
@@ -28,7 +28,7 @@ This directory contains production-ready code demonstrating how to wrap a Wren A
                                              ▼
                             ┌────────────────────────────────────────┐
                             │         WrenAI Semantic Layer          │
-                            │    (WrenToolkit / LangGraph Agent)     │
+                            │  (WrenToolkit; Track B adds LangGraph) │
                             └────────────────────────────────────────┘
 ```
 
@@ -37,8 +37,8 @@ This directory contains production-ready code demonstrating how to wrap a Wren A
 ## Features
 
 1. **Track A: FastMCP SSE Server (Port 8202)**:
-   - Exposes Wren AI semantic layer abilities (`wren_semantic_query`, `wren_get_system_prompt`, `wren_list_tools`) over Model Context Protocol (MCP) using SSE transport.
-   - Allows platform LLMs (GPT-4o, Claude 3.5, DeepSeek, etc.) to autonomously trigger NL2SQL and semantic data queries.
+   - Exposes real WrenToolkit tools (`wren_query`, `wren_dry_plan`, `wren_list_models`, optional memory tools, plus `wren_get_system_prompt`) over Model Context Protocol (MCP) using SSE transport.
+   - Platform LLMs (GPT-4o, Claude, DeepSeek, etc.) run their own ReAct loop: list/fetch context → write SQL → dry_plan → query. Track A is **not** an NL2SQL black box (use Track B for that).
 
 2. **Track B: OpenAI API Compatible Adapter (Port 8201)**:
    - Provides `/v1/models` and `/v1/chat/completions` endpoints supporting both non-streaming JSON responses and SSE streaming (`stream=true`).
@@ -113,8 +113,8 @@ All application logs follow a structured format tagged with `[req=<request_id>]`
 
 ```text
 2026-07-24 15:40:01 INFO [wren.sse] [req=chatcmpl-a0e2] stream_start route=/v1/chat/completions model=wren-agent process_mode=reasoning keepalive=15.0s style=comment
-2026-07-24 15:40:02 INFO [wren.tool] [req=chatcmpl-a0e2] tool_start name=wren_semantic_query args={"question":"Summary of sales..."}
-2026-07-24 15:40:03 INFO [wren.tool] [req=chatcmpl-a0e2] tool_end name=wren_semantic_query result_chars=1200
+2026-07-24 15:40:02 INFO [wren.tool] [req=chatcmpl-a0e2] tool_start name=wren_query args={"sql":"SELECT ...","limit":100}
+2026-07-24 15:40:03 INFO [wren.tool] [req=chatcmpl-a0e2] tool_end name=wren_query result_chars=1200
 2026-07-24 15:40:04 INFO [wren.llm] [req=chatcmpl-a0e2] invoke_start model=gpt-4o base=default messages=6
 2026-07-24 15:40:18 INFO [wren.llm] [req=chatcmpl-a0e2] invoke_end duration_ms=14012 has_tool_calls=false content_chars=256
 2026-07-24 15:40:18 INFO [wren.sse] [req=chatcmpl-a0e2] stream_end outcome=ok duration_ms=17050 keepalive_count=1 yielded_content=true
@@ -177,10 +177,21 @@ Test SSE connection:
 curl -N http://localhost:8202/sse
 ```
 
-Available Tools in FastMCP:
-- `wren_semantic_query(question: str)`: Executes natural language query against semantic layer.
-- `wren_get_system_prompt()`: Returns system prompt instructions & schema definition.
-- `wren_list_tools()`: Lists sub-tools and internal schemas.
+Available Tools in FastMCP (mirrors `WrenToolkit.get_tools()` + meta helper):
+
+| Tool | Args | Purpose |
+|---|---|---|
+| `wren_query` | `sql: str`, `limit: int = 100` | Execute SQL via the Wren semantic layer (hard cap 1000 rows) |
+| `wren_dry_plan` | `sql: str` | Expand MDL → target-dialect SQL (no DB round-trip) |
+| `wren_list_models` | _(none)_ | List project models / column counts / descriptions |
+| `wren_fetch_context` | `question`, `limit=5`, optional `item_type`/`model` | Embedding schema/context search (requires `.wren/memory/`) |
+| `wren_recall_queries` | `question`, `limit=3` | Recall past NL→SQL pairs (requires memory) |
+| `wren_store_query` | `nl`, `sql`, optional `tags` | Persist a confirmed NL→SQL pair (requires memory) |
+| `wren_get_system_prompt` | _(none)_ | Wren workflow system prompt for the calling agent |
+
+Memory tools are always advertised; if `.wren/memory/` is missing they return a clear error. Tool results are JSON envelopes (`{ok, content, data, ...}` or `{ok:false, error}`).
+
+> **Breaking change:** the old `wren_semantic_query(question)` / `wren_list_tools` entrypoints were removed — they incorrectly treated natural language as SQL. Re-sync MCP tools on any client (e.g. DEEIX) after upgrading.
 
 ---
 
