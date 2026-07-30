@@ -193,6 +193,20 @@ start_server.bat
 python start_dual_services.py
 ```
 
+### Chat UI at `/`
+
+Track B serves a built-in chat UI at `http://<host>:8201/`. It is **not**
+shipped pre-built — `dist/` is gitignored. Build it once:
+
+```bash
+cd wren-chat-ui && npm install && npm run build
+```
+
+Then `GET /` returns the compiled SPA (it talks to the native
+`/chat/stream` NDJSON endpoint). If `dist/` is absent, `/` falls back to a
+status dashboard listing the Track A / Track B endpoints. See
+`wren-chat-ui/README.md` for the dev-server flow and backend contract.
+
 ---
 
 ## API Endpoints & Usage
