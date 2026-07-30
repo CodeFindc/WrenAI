@@ -1,6 +1,6 @@
 # Wren LangGraph Stateful API Server & Dual-Track Integration
 
-This directory contains production-ready code demonstrating how to wrap a Wren AI semantic layer project inside a **stateful, multi-turn LangGraph Agent API Server** (with OpenAI compatibility) and a **FastMCP dual-transport Server** (classic SSE + Streamable HTTP) for seamless integration with AI platforms like **DEEIX-Chat**.
+This directory contains a runnable reference implementation demonstrating how to wrap a Wren AI semantic layer project inside a **stateful, multi-turn LangGraph Agent API Server** (with OpenAI compatibility) and a **FastMCP dual-transport Server** (classic SSE + Streamable HTTP) for seamless integration with AI platforms like **DEEIX-Chat**.
 
 ---
 
@@ -55,6 +55,25 @@ This directory contains production-ready code demonstrating how to wrap a Wren A
 
 ---
 
+## Minimal SDK Demos
+
+Besides the dual-track servers above, this directory ships two minimal scripts that show the `wren-langchain` SDK in isolation — no FastAPI, no MCP, no Docker:
+
+| Script | What it does |
+|---|---|
+| `langchain_demo.py` | Calls `langchain.agents.create_agent(model, tools, system_prompt)` — the high-level factory that hides the agent loop. |
+| `langgraph_demo.py` | Hand-builds the same ReAct loop with LangGraph primitives (`StateGraph`, `ToolNode`, conditional edges) so you can customize routing / state / streaming. |
+
+Run either with:
+
+```bash
+export OPENAI_API_KEY=sk-...
+export PROJECT_PATH=/path/to/your-wren-project
+python examples/langchain_demo.py      # or langgraph_demo.py
+```
+
+A committed DuckDB-backed sample project lives at `examples/wren_project` — run `wren context build` inside it first (see its `README` for the bundled data setup). This is the fastest way to try the demos without provisioning a real database.
+
 ---
 
 ## Environment Variables Reference
@@ -77,6 +96,7 @@ The Dual-Track services (FastMCP dual-transport MCP and OpenAI-compatible API) c
 | `OPENAI_API_KEY` | API Key for upstream LLM used by LangGraph agent logic. | `sk-proj-...` |
 | `LLM_API_BASE` / `OPENAI_API_BASE` | Base URL for LLM service (supports vLLM, Ollama, OneAPI, DeepSeek, etc.). | `http://192.168.110.209:8200/v1` |
 | `LLM_MODEL_NAME` | Model name passed to the upstream LLM provider. | `gpt-4o` or `Qwen3.6-27B` |
+| `LLM_REQUEST_TIMEOUT` | Upstream LLM HTTP request timeout in seconds. Long tool-heavy turns with large contexts can exceed the old hard-coded 60s and get false-killed. | `60` |
 
 ### 3. Track B OpenAI Adapter & Thinking Stream
 | Variable | Description | Default / Example |
@@ -106,6 +126,10 @@ The Dual-Track services (FastMCP dual-transport MCP and OpenAI-compatible API) c
 | `DB_HOST` / `DB_PORT` | Target database hostname and port. | `127.0.0.1:3306` |
 | `DB_NAME` / `DB_USER` / `DB_PASSWORD` | Database credentials and target database name. | `root` / `secret` |
 | `SSL_MODE` | Database SSL connection mode (`DISABLED`, `REQUIRED`, etc.). | `DISABLED` |
+| `EXTRA_PROFILE_KEYS` | JSON object of extra profile keys; nested dicts OK (e.g. `{"kwargs":{"read_timeout":120}}`). | _empty_ |
+| `DB_CONNECT_TIMEOUT` / `DB_READ_TIMEOUT` / `DB_WRITE_TIMEOUT` | MySQL/Doris driver-level timeouts (seconds). Only injected for `mysql`/`doris`; the library injects no default timeout for MySQL otherwise. | `5` / `60` / `30` |
+| `DB_MAX_CONNECTIONS` | MySQL/Doris connector connection-pool size. | `30` |
+| `DB_PROFILE_TIMEOUTS` | Set to `0` to skip injecting the MySQL/Doris `kwargs` block (e.g. for non-MySQL sources). | `1` |
 
 ---
 

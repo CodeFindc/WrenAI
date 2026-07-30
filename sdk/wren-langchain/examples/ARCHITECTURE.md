@@ -460,7 +460,7 @@ Dockerfile（两阶段）
 entrypoint.sh（容器启动，8 步）
   ① 建 /project  ② WREN_HOME=/project/.wren  ③ flock 并发锁
   ④ 由 DB_* env 生成 profiles.yml  ⑤ wren context init --empty + 绑定 profile
-  ⑥ wren context build（models/*.mdl → target/mdl.json）  ⑦ wren memory index
+  ⑥ wren context build（models/*.yml → target/mdl.json）  ⑦ wren memory index
   ⑧ 打印配置摘要 → exec "$@"（交棒 CMD）
         │
         ▼
@@ -589,7 +589,7 @@ ToolNode 分发每个调用到对应 StructuredTool
 | 诊断 | `LOG_LEVEL=INFO` | `wren` logger 级别 |
 | 持久化历史 | `CHAT_HISTORY_DB_URI` | MySQL URI→持久 checkpointer；空→`MemorySaver` |
 | 数据源 profile | `ACTIVE_PROFILE`、`DATASOURCE=mysql`、`DB_HOST/PORT/NAME/USER/PASSWORD`、`SSL_MODE`、`EXTRA_PROFILE_KEYS`(JSON) | 由 entrypoint/bat 生成 `profiles.yml` |
-| FunAI | `FUNAI_SKILLS_PATH`、`FUNAI_SESSIONS_PATH` | 技能/会话路径 |
+| MySQL 超时/池 | `DB_CONNECT_TIMEOUT`/`DB_READ_TIMEOUT`/`DB_WRITE_TIMEOUT`/`DB_MAX_CONNECTIONS`/`DB_PROFILE_TIMEOUTS` | entrypoint/bat 生成 profile 的 `kwargs` 块（仅 mysql/doris 注入） |
 | MCP 扩展 | `MCP_CONFIG_DIR` | 外部 MCP 服务器 JSON 定义目录 |
 
 **关键运行时 env**（直接被 `langgraph_fastapi_multi.py` 读取）：`PROJECT_PATH`、`PORT`、`CHAT_HISTORY_DB_URI`、`MCP_CONFIG_DIR`、`MCP_CONNECT_TIMEOUT`/`MCP_READ_TIMEOUT`/`MCP_RETRY_INTERVAL`、`LLM_*`/`OPENAI_API_BASE`/`OPENAI_API_KEY`、`OPENAI_PROCESS_STREAM_MODE`/`OPENAI_PROCESS_MAX_TOOL_CHARS`、`OPENAI_SSE_KEEPALIVE_*`、`OPENAI_EXPOSED_MODELS`、`LOG_LEVEL`、`STREAM`（demo 用）。
@@ -735,7 +735,7 @@ ToolNode 分发每个调用到对应 StructuredTool
 
 ## 10. 术语表
 
-- **MDL**（Modeling Definition Language）：Wren 的语义建模清单，`target/mdl.json`；`wren context build` 由 `models/*.mdl` 编译产出。
+- **MDL**（Modeling Definition Language）：Wren 的语义建模清单，`target/mdl.json`；`wren context build` 由 `models/*.yml`（YAML 模型源）编译产出。仓库里不存在 `.mdl` 文件，该叫法仅作历史沿用。
 - **WrenToolkit**：`wren-langchain` 的唯一公开 facade，封装 MDL/profile/memory/引擎装配与 LangChain 工具适配。
 - **checkpointer / thread_id**：LangGraph 的状态持久化机制与键；本示例中 `thread_id = session_id`，键控多轮/多会话。
 - **ReAct**：Reason+Act 循环——LLM 决策调工具→执行→回喂→再决策，至无工具调用结束。

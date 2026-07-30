@@ -13,9 +13,9 @@ tools only.
 
 Prerequisites
 =============
-  - A CLI-prepared Wren project. Either follow the README quickstart, or
-    see ``temp-docs/v0.1-langchain-langgraph-sdk-local-testing-guide.md`` §3
-    for a one-shot DuckDB-backed demo project.
+  - A CLI-prepared Wren project. See the README "Minimal SDK Demos" section
+    for a one-shot DuckDB-backed sample project shipped at ``wren_project/``
+    (run ``wren context build`` inside it first).
   - ``langchain-openai`` installed in the active venv:
         uv pip install langchain-openai
   - ``OPENAI_API_KEY`` set in the environment.
