@@ -1,0 +1,39 @@
+name: orders
+ref_sql: |
+  SELECT 1 AS order_id, 100 AS customer_id, 50.00 AS total
+  UNION ALL
+  SELECT 2, 100, 75.50
+  UNION ALL
+  SELECT 3, 200, 120.00
+  UNION ALL
+  SELECT 4, 200, 30.00
+  UNION ALL
+  SELECT 5, 300, 200.00
+primary_key: order_id
+columns:
+  - name: order_id
+    type: INTEGER
+    is_primary_key: true
+    not_null: true
+    properties:
+      description: "Unique order identifier."
+  - name: customer_id
+    type: INTEGER
+    not_null: true
+    properties:
+      description: "FK to customers.customer_id."
+  - name: total
+    type: DOUBLE
+    properties:
+      description: "Order subtotal in USD before tax."
+  - name: customer
+    type: customers
+    relationship: orders_customer
+    properties:
+      description: "The customer who placed this order (MANY_TO_ONE)."
+  - name: total_with_tax
+    type: DOUBLE
+    is_calculated: true
+    expression: "total * 1.1"
+    properties:
+      description: "Order total including 10% sales tax."

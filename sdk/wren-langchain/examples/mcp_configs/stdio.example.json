@@ -1,0 +1,9 @@
+{
+  "filesystem": {
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/wren-shared"],
+    "env": {
+      "NODE_NO_WARNINGS": "1"
+    }
+  }
+}

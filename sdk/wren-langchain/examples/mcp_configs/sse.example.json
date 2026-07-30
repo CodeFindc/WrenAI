@@ -1,0 +1,9 @@
+{
+  "legacy-sse": {
+    "url": "https://mcp.example.com/sse",
+    "type": "sse",
+    "headers": {
+      "Authorization": "Bearer ${REMOTE_MCP_TOKEN}"
+    }
+  }
+}

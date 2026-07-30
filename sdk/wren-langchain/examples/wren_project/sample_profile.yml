@@ -1,0 +1,12 @@
+# Sample connection profile for the duckdb in-memory data source.
+# Register it with:
+#   wren profile add sample-duckdb --from-file sample_profile.yml --activate
+# Then `wren context set-profile sample-duckdb` (run inside wren_project/)
+# writes `profile: sample-duckdb` + `data_source: duckdb` into wren_project.yml.
+#
+# format: csv  → the DuckDB connector does NOT ATTACH any .duckdb file, so
+# the in-memory session evaluates the models' ref_sql subqueries directly.
+# No credentials are needed for this sample.
+datasource: duckdb
+url: .
+format: csv

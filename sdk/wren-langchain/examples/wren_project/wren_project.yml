@@ -1,0 +1,12 @@
+schema_version: 3
+name: wren_sample
+version: "1.0"
+catalog: wren
+schema: public
+# DuckDB is bundled with wren-engine (no extra connector install needed).
+# The sample models below use ref_sql with inline data, so no .duckdb file is
+# attached at runtime — the in-memory DuckDB session evaluates the ref_sql
+# subqueries directly. Point data_source/profile at a real database by
+# swapping the profile in ~/.wren/profiles.yml.
+data_source: duckdb
+profile: sample-duckdb

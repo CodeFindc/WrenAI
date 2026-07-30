@@ -1,0 +1,29 @@
+name: customers
+ref_sql: |
+  SELECT 100 AS customer_id, 'Alice' AS first_name, 'Smith' AS last_name
+  UNION ALL
+  SELECT 200, 'Bob', 'Jones'
+  UNION ALL
+  SELECT 300, 'Carol', 'Brown'
+primary_key: customer_id
+columns:
+  - name: customer_id
+    type: INTEGER
+    is_primary_key: true
+    not_null: true
+    properties:
+      description: "Unique customer identifier."
+  - name: first_name
+    type: VARCHAR
+    properties:
+      description: "Customer given name."
+  - name: last_name
+    type: VARCHAR
+    properties:
+      description: "Customer family name."
+  - name: full_name
+    type: VARCHAR
+    is_calculated: true
+    expression: "first_name || ' ' || last_name"
+    properties:
+      description: "Concatenated first and last name."

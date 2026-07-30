@@ -1,0 +1,9 @@
+{
+  "remote-tools": {
+    "url": "https://mcp.example.com/mcp",
+    "type": "streamable_http",
+    "headers": {
+      "Authorization": "Bearer ${REMOTE_MCP_TOKEN}"
+    }
+  }
+}
