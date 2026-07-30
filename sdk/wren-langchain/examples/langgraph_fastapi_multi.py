@@ -497,7 +497,15 @@ def build_app(toolkit: WrenToolkit, checkpointer: Any = None, model_name: str = 
     api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
     model_to_use = os.getenv("LLM_MODEL_NAME", model_name)
 
-    print(f"--- Configured LLM: {model_to_use} | API Base: {api_base} ---")
+    # LLM request timeout. Long tool-heavy turns + large contexts can exceed
+    # the previous hard-coded 60s and get false-killed; make it tunable.
+    try:
+        llm_request_timeout = float(os.getenv("LLM_REQUEST_TIMEOUT", "60"))
+    except ValueError:
+        print(f"[WARN] Invalid LLM_REQUEST_TIMEOUT={os.getenv('LLM_REQUEST_TIMEOUT')!r}, using 60s")
+        llm_request_timeout = 60.0
+
+    print(f"--- Configured LLM: {model_to_use} | API Base: {api_base} | request_timeout={llm_request_timeout}s ---")
 
     # Keep a cached instance to preserve connection pooling/performance under normal conditions
     model_with_tools = None
@@ -506,11 +514,11 @@ def build_app(toolkit: WrenToolkit, checkpointer: Any = None, model_name: str = 
         nonlocal model_with_tools
         if model_with_tools is None:
             model_with_tools = ChatOpenAI(
-                model=model_to_use, 
+                model=model_to_use,
                 base_url=api_base,
                 api_key=api_key,
                 temperature=0,
-                request_timeout=60.0, # 60s request timeout to prevent LLM network/inference hang
+                request_timeout=llm_request_timeout,
                 model_kwargs={
                     "extra_body": {
                         "option": {
@@ -572,6 +580,17 @@ toolkit: WrenToolkit | None = None
 langgraph_app = None
 langgraph_app_stateless = None
 
+# Serialises lazy_init_app so concurrent first requests do not race to build
+# the toolkit / checkpointer / graph twice (e.g. two simultaneous /chat calls
+# on a freshly started server). asyncio.Lock is cooperative within the event
+# loop; lazy_init_app only awaits (no blocking sync work held while locked).
+lazy_init_lock: asyncio.Lock = asyncio.Lock()
+
+# Captured when toolkit init fails during lifespan so /health can surface a
+# degraded state without re-running the init path. Cleared on successful lazy
+# re-init.
+toolkit_init_error: str | None = None
+
 
 async def retry_failed_mcp_connections_loop():
     """Background task to periodically retry connecting to failed MCP servers and load their tools."""
@@ -627,7 +646,28 @@ try:
     from contextlib import contextmanager
 
     class ReconnectingPyMySQLSaver(PyMySQLSaver):
-        """Thread-safe and reconnecting PyMySQL Saver using threading.RLock to prevent reentrant deadlocks."""
+        """Thread-safe and reconnecting PyMySQL Saver using threading.RLock to prevent reentrant deadlocks.
+
+        Known concurrency limit (library-level, cannot be fixed in examples):
+        The parent ``PyMySQLSaver`` holds a **single** ``self.conn`` and a
+        ``threading.Lock``; every checkpoint op (get/put/list/put_writes)
+        acquires that lock for its whole duration. So even though we wrap the
+        sync ops in ``run_in_executor`` (see aget_tuple / aput / … below),
+        concurrent sessions **serialize on the one connection**. Multi-session
+        throughput is therefore bounded by single-connection latency, and high
+        concurrency will queue here.
+
+        Real fixes are architectural and outside examples scope:
+          * use a pooled/async saver (e.g. langgraph-checkpoint-mysql async
+            backend, or a connection pool that hands out one conn per op), or
+          * run multiple saver instances behind a shard-by-thread_id router.
+
+        What this subclass *does* improve over the bare parent:
+          * RLock prevents reentrant deadlock when super().setup() internally
+            calls methods that also take the lock;
+          * _ping_unlocked detects dead/stale connections and reconnects
+            transparently instead of raising on the next op.
+        """
         def __init__(self, *args, conn_args: dict = None, **kwargs):
             super().__init__(*args, **kwargs)
             self.conn_args = conn_args
@@ -779,8 +819,8 @@ langgraph_app = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle context manager to initialize the Wren Toolkit, MCP sessions, and checkpointer at startup."""
-    global toolkit, langgraph_app, mcp_sessions, global_mcp_tools, mcp_retry_task, mcp_manager_task, mysql_exit_stack
-    
+    global toolkit, langgraph_app, mcp_sessions, global_mcp_tools, mcp_retry_task, mcp_manager_task, mysql_exit_stack, toolkit_init_error
+
     print("[LIFESPAN] Starting dual-track server lifespan initialization...", flush=True)
 
     # Start persistent MCP manager task
@@ -795,7 +835,9 @@ async def lifespan(app: FastAPI):
             # Run in worker thread to prevent blocking Uvicorn startup loop
             toolkit = await asyncio.to_thread(WrenToolkit.from_project, project_path)
             print("[LIFESPAN] Successfully initialized WrenToolkit!", flush=True)
+            toolkit_init_error = None
         except Exception as e:
+            toolkit_init_error = str(e)
             print(f"[LIFESPAN Warning] Error initializing WrenToolkit during lifespan startup: {e}. Will lazy-initialize on first request.", flush=True)
 
     if not os.environ.get("OPENAI_API_KEY"):
@@ -1198,13 +1240,30 @@ def health_check():
     if langgraph_app and hasattr(langgraph_app, "checkpointer"):
         cp = langgraph_app.checkpointer
         checkpointer_type = type(cp).__name__
+        # MySQL checkpointer: healthy only if the underlying conn is live.
+        # MemorySaver: always "ready" (in-process), so report True.
         if "MySQL" in checkpointer_type or hasattr(cp, "conn"):
-            checkpointer_status = True
+            try:
+                if hasattr(cp, "conn") and cp.conn is not None:
+                    # Cheap liveness probe without taking the RLock path.
+                    cp.conn.ping()
+                    checkpointer_status = True
+                else:
+                    checkpointer_status = False
+            except Exception:
+                checkpointer_status = False
         else:
             checkpointer_status = True
 
+    # Surface a degraded state if lifespan toolkit init failed (it will be
+    # retried lazily on first request). /health then reflects this rather than
+    # silently reporting healthy.
+    degraded = (toolkit is None or not target_db_status)
+    if toolkit_init_error:
+        target_db_error = target_db_error or toolkit_init_error
+
     return {
-        "status": "healthy" if (toolkit is not None and target_db_status) else "degraded",
+        "status": "healthy" if not degraded else "degraded",
         "project_loaded": toolkit is not None,
         "tools_count": tools_count,
         "target_db_connected": target_db_status,
@@ -1212,6 +1271,7 @@ def health_check():
         "checkpointer_type": checkpointer_type,
         "checkpointer_connected": checkpointer_status,
         "stateless_graph_ready": langgraph_app_stateless is not None,
+        "toolkit_init_error": toolkit_init_error,
         "memory_enabled": toolkit._memory.enabled if toolkit and hasattr(toolkit, "_memory") else False
     }
 
@@ -1565,62 +1625,74 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
 
 
 
-def lazy_init_app(model_name: str = "gpt-4o"):
-    """Thread-safe and exception-safe lazy initialization for stateful and stateless LangGraph applications."""
-    global langgraph_app, langgraph_app_stateless, toolkit
+async def lazy_init_app(model_name: str = "gpt-4o"):
+    """Thread-safe and exception-safe lazy initialization for stateful and stateless LangGraph applications.
+
+    Serialised by ``lazy_init_lock`` so concurrent first requests cooperate
+    instead of racing to build the toolkit / checkpointer / graph twice.
+    """
+    global langgraph_app, langgraph_app_stateless, toolkit, toolkit_init_error
     if langgraph_app and langgraph_app_stateless:
         return
-        
-    project_path = os.environ.get("PROJECT_PATH")
-    if not project_path:
-        raise HTTPException(
-            status_code=500,
-            detail="WrenToolkit not initialized. Please set PROJECT_PATH environment variable."
-        )
-    try:
-        if not toolkit:
-            toolkit = WrenToolkit.from_project(project_path)
-            
-        if not langgraph_app:
-            # Check if DB URI is set to use MySQL checkpointer even during lazy load
-            db_uri = os.environ.get("CHAT_HISTORY_DB_URI")
-            checkpointer = None
-            if db_uri and ReconnectingPyMySQLSaver:
-                db_uri = db_uri.strip().strip('"').strip("'")
-                if "autocommit" not in db_uri.lower():
-                    separator = "&" if "?" in db_uri else "?"
-                    db_uri = f"{db_uri}{separator}autocommit=true"
-                try:
-                    import concurrent.futures
-                    cand = mysql_exit_stack.enter_context(ReconnectingPyMySQLSaver.from_conn_string(db_uri))
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                        fut = executor.submit(cand.setup)
-                        try:
-                            fut.result(timeout=10.0) # 10s timeout alignment with lifespan
-                            checkpointer = cand
-                            print("Lazy-initialized persistent MySQL checkpointer!")
-                        except (concurrent.futures.TimeoutError, Exception) as setup_err:
-                            print(f"Warning during lazy MySQL setup: {setup_err}. Cleaning up connection leak & falling back to MemorySaver.")
-                            try:
-                                mysql_exit_stack.pop_all().close()
-                            except Exception:
-                                pass
-                            checkpointer = None
-                except Exception as db_err:
-                    print(f"Failed to lazy-initialize MySQL checkpointer: {db_err}. Falling back to MemorySaver...")
-                    checkpointer = None
-                    
-            if not checkpointer:
-                print("Using in-memory MemorySaver (data will clear on server reload) for lazy init.")
-                from langgraph.checkpoint.memory import MemorySaver
-                checkpointer = MemorySaver()
-                
-            langgraph_app = build_app(toolkit, checkpointer, model_name=model_name)
 
-        if not langgraph_app_stateless:
-            langgraph_app_stateless = build_app(toolkit, checkpointer=None, model_name=model_name)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to lazy initialize app: {e}")
+    async with lazy_init_lock:
+        # Re-check inside the lock: another request may have finished init
+        # while we were queued.
+        if langgraph_app and langgraph_app_stateless:
+            return
+
+        project_path = os.environ.get("PROJECT_PATH")
+        if not project_path:
+            raise HTTPException(
+                status_code=500,
+                detail="WrenToolkit not initialized. Please set PROJECT_PATH environment variable."
+            )
+        try:
+            if not toolkit:
+                toolkit = WrenToolkit.from_project(project_path)
+            toolkit_init_error = None  # cleared on successful init
+
+            if not langgraph_app:
+                # Check if DB URI is set to use MySQL checkpointer even during lazy load
+                db_uri = os.environ.get("CHAT_HISTORY_DB_URI")
+                checkpointer = None
+                if db_uri and ReconnectingPyMySQLSaver:
+                    db_uri = db_uri.strip().strip('"').strip("'")
+                    if "autocommit" not in db_uri.lower():
+                        separator = "&" if "?" in db_uri else "?"
+                        db_uri = f"{db_uri}{separator}autocommit=true"
+                    try:
+                        import concurrent.futures
+                        cand = mysql_exit_stack.enter_context(ReconnectingPyMySQLSaver.from_conn_string(db_uri))
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                            fut = executor.submit(cand.setup)
+                            try:
+                                fut.result(timeout=10.0) # 10s timeout alignment with lifespan
+                                checkpointer = cand
+                                print("Lazy-initialized persistent MySQL checkpointer!")
+                            except (concurrent.futures.TimeoutError, Exception) as setup_err:
+                                print(f"Warning during lazy MySQL setup: {setup_err}. Cleaning up connection leak & falling back to MemorySaver.")
+                                try:
+                                    mysql_exit_stack.pop_all().close()
+                                except Exception:
+                                    pass
+                                checkpointer = None
+                    except Exception as db_err:
+                        print(f"Failed to lazy-initialize MySQL checkpointer: {db_err}. Falling back to MemorySaver...")
+                        checkpointer = None
+
+                if not checkpointer:
+                    print("Using in-memory MemorySaver (data will clear on server reload) for lazy init.")
+                    from langgraph.checkpoint.memory import MemorySaver
+                    checkpointer = MemorySaver()
+
+                langgraph_app = build_app(toolkit, checkpointer, model_name=model_name)
+
+            if not langgraph_app_stateless:
+                langgraph_app_stateless = build_app(toolkit, checkpointer=None, model_name=model_name)
+        except Exception as e:
+            toolkit_init_error = str(e)
+            raise HTTPException(status_code=500, detail=f"Failed to lazy initialize app: {e}")
 
 
 @app.post("/chat")
