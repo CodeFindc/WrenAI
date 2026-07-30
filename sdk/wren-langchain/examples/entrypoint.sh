@@ -26,6 +26,17 @@
 #   SSL_MODE            SSL mode (e.g. DISABLED, PREFERRED, REQUIRED)
 #   EXTRA_PROFILE_KEYS  Additional YAML keys as a JSON object, e.g.
 #                       '{"ssl_mode":"DISABLED","extra_field":"value"}'
+#                       Nested dict values are supported (serialised with
+#                       yaml.safe_dump), e.g. '{"kwargs":{"connect_timeout":5}}'.
+#
+# MySQL / Doris timeout & pool defaults (override or disable via env):
+#   DB_CONNECT_TIMEOUT  MySQLdb connect_timeout seconds   (default: 5)
+#   DB_READ_TIMEOUT     MySQLdb read_timeout seconds      (default: 60)
+#   DB_WRITE_TIMEOUT    MySQLdb write_timeout seconds     (default: 30)
+#   DB_MAX_CONNECTIONS  connector connection-pool size    (default: 30)
+#   DB_PROFILE_TIMEOUTS Set to "0" to skip injecting the kwargs block
+#                       (e.g. for non-MySQL sources or to rely on the
+#                       connector/library defaults).
 #
 
 set -euo pipefail
@@ -94,31 +105,94 @@ else
 
         info "Generating profile '${profile_name}' (datasource: ${datasource}) from environment variables"
 
-        # Start YAML output
-        {
-            echo "active: ${profile_name}"
-            echo "profiles:"
-            echo "  ${profile_name}:"
-            echo "    datasource: ${datasource}"
+        # Determine whether to inject the MySQL/Doris kwargs block.
+        # MySQLdb/connector accept connect_timeout / read_timeout /
+        # write_timeout (driver-level) and max_connections (pool size, read
+        # by mysql.py:148-150 and popped before reaching MySQLdb). The
+        # library does NOT inject any default timeout for mysql (only
+        # postgres gets connect_timeout=120), so without this block a slow
+        # query can hang the connection indefinitely.
+        inject_kwargs=1
+        case "${datasource}" in
+            mysql|doris)
+                if [ "${DB_PROFILE_TIMEOUTS:-1}" = "0" ]; then
+                    inject_kwargs=0
+                fi
+                ;;
+            *)
+                inject_kwargs=0
+                ;;
+        esac
+        if [ "$inject_kwargs" = "1" ]; then
+            DB_CONNECT_TIMEOUT="${DB_CONNECT_TIMEOUT:-5}"
+            DB_READ_TIMEOUT="${DB_READ_TIMEOUT:-60}"
+            DB_WRITE_TIMEOUT="${DB_WRITE_TIMEOUT:-30}"
+            DB_MAX_CONNECTIONS="${DB_MAX_CONNECTIONS:-30}"
+            # MySqlConnectionInfo.kwargs is typed dict[str, str] | None — the
+            # pydantic schema rejects int values, so emit them as strings.
+            # MySQLdb and the pool both coerce to int at use time
+            # (mysql.py does int(...) on max_connections).
+            TIMEOUTS_JSON="{\"connect_timeout\":\"${DB_CONNECT_TIMEOUT}\",\"read_timeout\":\"${DB_READ_TIMEOUT}\",\"write_timeout\":\"${DB_WRITE_TIMEOUT}\",\"max_connections\":\"${DB_MAX_CONNECTIONS}\"}"
+        else
+            TIMEOUTS_JSON=""
+        fi
 
-            # Standard connection fields (only if set)
-            [ -n "${DB_HOST:-}" ]     && echo "    host: ${DB_HOST}"
-            [ -n "${DB_PORT:-}" ]     && echo "    port: ${DB_PORT}"
-            [ -n "${DB_NAME:-}" ]     && echo "    database: ${DB_NAME}"
-            [ -n "${DB_USER:-}" ]     && echo "    user: ${DB_USER}"
-            [ -n "${DB_PASSWORD:-}" ] && echo "    password: ${DB_PASSWORD}"
-            [ -n "${SSL_MODE:-}" ]    && echo "    ssl_mode: ${SSL_MODE}"
+        # Build the YAML for this profile with Python so nested dicts (the
+        # kwargs block, or any EXTRA_PROFILE_KEYS dict value) are serialised
+        # as real YAML instead of Python repr.
+        export PROFILE_NAME="$profile_name" DATASOURCE="$datasource" \
+               TIMEOUTS_JSON EXTRA_PROFILE_KEYS
+        python3 - <<'PY' > "$PROFILES_FILE"
+import json, os, sys, yaml
 
-            # Additional keys from JSON env var
-            if [ -n "${EXTRA_PROFILE_KEYS:-}" ]; then
-                echo "$EXTRA_PROFILE_KEYS" | python3 -c "
-        import sys, json
-        extra = json.load(sys.stdin)
-        for k, v in extra.items():
-            print(f'    {k}: {v}')
-        " 2>/dev/null || warn "EXTRA_PROFILE_KEYS is not valid JSON — skipping extra keys"
-            fi
-        } > "$PROFILES_FILE"
+profile_name = os.environ["PROFILE_NAME"]
+datasource = os.environ["DATASOURCE"]
+
+entry = {"datasource": datasource}
+for yaml_key, env_key in (
+    ("host", "DB_HOST"), ("port", "DB_PORT"), ("database", "DB_NAME"),
+    ("user", "DB_USER"), ("password", "DB_PASSWORD"), ("ssl_mode", "SSL_MODE"),
+):
+    val = os.environ.get(env_key)
+    if val:
+        entry[yaml_key] = val
+
+# Default MySQL/Doris timeout + pool kwargs (driver-level). Values are kept
+# as strings because MySqlConnectionInfo.kwargs is dict[str, str] | None.
+timeouts_json = os.environ.get("TIMEOUTS_JSON", "").strip()
+if timeouts_json:
+    entry["kwargs"] = json.loads(timeouts_json)
+
+# User-provided extra keys (JSON object). Nested dict values are supported
+# and serialised correctly. A user "kwargs" merges over the defaults above
+# (per-key, last write wins); its values are stringified to stay schema-valid.
+extra_raw = os.environ.get("EXTRA_PROFILE_KEYS", "").strip()
+if extra_raw:
+    try:
+        extra = json.loads(extra_raw)
+        if isinstance(extra, dict):
+            for k, v in extra.items():
+                if (
+                    k == "kwargs"
+                    and isinstance(v, dict)
+                    and isinstance(entry.get("kwargs"), dict)
+                ):
+                    merged = dict(entry["kwargs"])
+                    merged.update({kk: str(vv) for kk, vv in v.items()})
+                    entry["kwargs"] = merged
+                else:
+                    entry[k] = v
+        else:
+            sys.stderr.write("EXTRA_PROFILE_KEYS is not a JSON object — skipping\n")
+    except json.JSONDecodeError:
+        sys.stderr.write("EXTRA_PROFILE_KEYS is not valid JSON — skipping\n")
+
+doc = {"active": profile_name, "profiles": {profile_name: entry}}
+yaml.safe_dump(doc, default_flow_style=False, sort_keys=False, allow_unicode=True)
+PY
+        if [ $? -ne 0 ]; then
+            warn "EXTRA_PROFILE_KEYS is not valid JSON — skipping extra keys"
+        fi
 
         chmod 600 "$PROFILES_FILE"
         info "Profile written to $PROFILES_FILE"

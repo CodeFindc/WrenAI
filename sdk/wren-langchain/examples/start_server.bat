@@ -244,22 +244,19 @@ if not defined datasource (
 )
 
 echo      Generating profile '!ACTIVE_PROFILE!' (datasource: !datasource!) ...
-(
-    echo active: !ACTIVE_PROFILE!
-    echo profiles:
-    echo   !ACTIVE_PROFILE!:
-    echo     datasource: !datasource!
-    if defined DB_HOST echo     host: !DB_HOST!
-    if defined DB_PORT echo     port: !DB_PORT!
-    if defined DB_NAME echo     database: !DB_NAME!
-    if defined DB_USER echo     user: !DB_USER!
-    if defined DB_PASSWORD echo     password: !DB_PASSWORD!
-    if defined SSL_MODE echo     ssl_mode: !SSL_MODE!
-) > "%PROFILES_FILE%"
 
-:: Handle EXTRA_PROFILE_KEYS (JSON) via Python
-if defined EXTRA_PROFILE_KEYS (
-    python -c "import sys, json; [print(f'    {k}: {v}') for k, v in json.loads(sys.argv[1]).items()]" "!EXTRA_PROFILE_KEYS!" >> "%PROFILES_FILE%" 2>nul
+:: Default the active profile name to match entrypoint.sh ("default").
+if not defined ACTIVE_PROFILE set "ACTIVE_PROFILE=default"
+
+:: Build the whole profile YAML with Python so nested dicts (the MySQL/Doris
+:: kwargs block, or any EXTRA_PROFILE_KEYS dict value) serialise as real YAML
+:: instead of Python repr. Python reads all needed env vars directly; we only
+:: pass the output path. Set DB_PROFILE_TIMEOUTS=0 to skip the kwargs block
+:: (e.g. for non-MySQL sources or to rely on library defaults).
+set "WREN_PROFILE_FILE=%PROFILES_FILE%"
+python "%SCRIPT_DIR%generate_profile.py"
+if !ERRORLEVEL! neq 0 (
+    echo      WARNING: profile generation failed. Check DATASOURCE / EXTRA_PROFILE_KEYS.
 )
 echo      Profile written to !PROFILES_FILE!
 
