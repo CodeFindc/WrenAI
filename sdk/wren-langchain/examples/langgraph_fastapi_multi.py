@@ -819,7 +819,7 @@ langgraph_app = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle context manager to initialize the Wren Toolkit, MCP sessions, and checkpointer at startup."""
-    global toolkit, langgraph_app, mcp_sessions, global_mcp_tools, mcp_retry_task, mcp_manager_task, mysql_exit_stack, toolkit_init_error
+    global toolkit, langgraph_app, langgraph_app_stateless, mcp_sessions, global_mcp_tools, mcp_retry_task, mcp_manager_task, mysql_exit_stack, toolkit_init_error
 
     print("[LIFESPAN] Starting dual-track server lifespan initialization...", flush=True)
 
@@ -1420,7 +1420,12 @@ def make_sse_keepalive_chunk(completion_id: str, model: str, created_ts: int, st
 @app.post("/v1/chat/completions")
 async def openai_chat_completions(request: OpenAIChatCompletionRequest):
     """OpenAI API compatible chat completion endpoint. Stateless: relies strictly on request messages[]."""
-    lazy_init_app(model_name=request.model)
+    await lazy_init_app(model_name=request.model)
+    if not langgraph_app_stateless:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Stateless LangGraph app is not initialized. Toolkit status: {'Error: ' + toolkit_init_error if toolkit_init_error else 'Pending initialization'}"
+        )
 
     if not request.messages:
         raise HTTPException(status_code=400, detail="messages field cannot be empty.")
@@ -1698,7 +1703,7 @@ async def lazy_init_app(model_name: str = "gpt-4o"):
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequestMulti):
     """Standard non-streaming stateful chat endpoint. Persistent history is loaded and updated."""
-    lazy_init_app(model_name=request.model_name)
+    await lazy_init_app(model_name=request.model_name)
 
     # Generate session ID if not provided
     actual_session_id = request.session_id or str(uuid.uuid4())
@@ -1730,7 +1735,7 @@ async def chat_endpoint(request: ChatRequestMulti):
 @app.post("/chat/stream")
 async def chat_stream_endpoint(request: ChatRequestMulti):
     """Streaming stateful chat endpoint. Persistent history is loaded and updated."""
-    lazy_init_app(model_name=request.model_name)
+    await lazy_init_app(model_name=request.model_name)
 
     # Generate session ID if not provided
     actual_session_id = request.session_id or str(uuid.uuid4())
@@ -1788,7 +1793,7 @@ async def chat_stream_endpoint(request: ChatRequestMulti):
 @app.get("/chat/history/{session_id}")
 async def get_session_history(session_id: str):
     """Retrieve full conversation history of a specific session ID from checkpointer."""
-    lazy_init_app()
+    await lazy_init_app()
     
     config = {"configurable": {"thread_id": session_id}}
     try:

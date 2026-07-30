@@ -40,6 +40,7 @@ def main():
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
+    mcp_crash_count = 0
     try:
         while True:
             time.sleep(2)
@@ -48,7 +49,12 @@ def main():
                 mcp_proc.terminate()
                 sys.exit(api_proc.returncode)
             if mcp_proc.poll() is not None:
-                print(f"[WARNING] FastMCP server process exited with code {mcp_proc.returncode}. Restarting...")
+                mcp_crash_count += 1
+                print(f"[WARNING] FastMCP server process exited with code {mcp_proc.returncode}. (Crash #{mcp_crash_count})")
+                if mcp_crash_count >= 5:
+                    print("[ERROR] FastMCP server keeps crashing. Ensure 'mcp>=1.2.0' is installed in your python environment: pip install \"mcp>=1.2.0\"")
+                time.sleep(3)
+                print("[INFO] Restarting FastMCP server process...")
                 mcp_proc = subprocess.Popen([sys.executable, "wren_mcp_server.py"], env=mcp_env)
     except KeyboardInterrupt:
         handle_signal(None, None)

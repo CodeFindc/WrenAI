@@ -36,7 +36,10 @@ from typing import Any, AsyncIterator
 try:
     from mcp.server.fastmcp import FastMCP
 except ImportError:
-    sys.exit("mcp package with FastMCP is required. Run: pip install mcp")
+    try:
+        from fastmcp import FastMCP
+    except ImportError:
+        sys.exit("mcp package with FastMCP support (mcp>=1.2.0) is required. Please run: pip install \"mcp>=1.2.0\"")
 
 from starlette.applications import Starlette
 from starlette.requests import Request
