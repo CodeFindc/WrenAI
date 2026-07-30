@@ -50,11 +50,18 @@ def main():
                 sys.exit(api_proc.returncode)
             if mcp_proc.poll() is not None:
                 mcp_crash_count += 1
-                print(f"[WARNING] FastMCP server process exited with code {mcp_proc.returncode}. (Crash #{mcp_crash_count})")
+                print(f"[WARNING] FastMCP server process exited with code {mcp_proc.returncode}. (Crash #{mcp_crash_count})", flush=True)
                 if mcp_crash_count >= 5:
-                    print("[ERROR] FastMCP server keeps crashing. Ensure 'mcp>=1.2.0' is installed in your python environment: pip install \"mcp>=1.2.0\"")
+                    print(
+                        f"[ERROR] FastMCP server (wren_mcp_server.py) repeatedly exited with code {mcp_proc.returncode}.\n"
+                        f"Common causes:\n"
+                        f"  1. Port {mcp_env.get('PORT', '8202')} is already in use by another process.\n"
+                        f"  2. Direct exception during uvicorn startup (check traceback above).\n"
+                        f"To debug directly, run: python wren_mcp_server.py",
+                        flush=True
+                    )
                 time.sleep(3)
-                print("[INFO] Restarting FastMCP server process...")
+                print("[INFO] Restarting FastMCP server process...", flush=True)
                 mcp_proc = subprocess.Popen([sys.executable, "wren_mcp_server.py"], env=mcp_env)
     except KeyboardInterrupt:
         handle_signal(None, None)

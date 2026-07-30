@@ -371,4 +371,10 @@ if __name__ == "__main__":
         f'  {{"name":"wren-semantic","baseURL":"http://<host>:{PORT}{STREAMABLE_HTTP_PATH}"}}'
     )
     # Use the merged app (not mcp.run) so both transports stay live.
-    uvicorn.run(app, host=HOST, port=PORT, log_level="info")
+    try:
+        uvicorn.run(app, host=HOST, port=PORT, log_level="info")
+    except Exception as err:
+        import traceback
+        print(f"[ERROR] FastMCP server failed to start: {err}", file=sys.stderr, flush=True)
+        traceback.print_exc()
+        sys.exit(1)
