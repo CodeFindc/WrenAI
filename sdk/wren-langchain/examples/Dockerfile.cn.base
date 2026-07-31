@@ -1,5 +1,5 @@
 # Pre-packaged Pure Python 3.14 Base Image (CN Accelerated Base)
-# Only pre-installs heavy Python dependencies and system build libraries (No UI, No Repo Clone)
+# Pre-installs all heavy Python dependencies via core/wren, wren-langchain, and requirements.txt
 FROM python:3.14
 
 WORKDIR /app
@@ -16,7 +16,7 @@ ENV PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple
 ENV PIP_EXTRA_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 ENV PIP_PREFER_BINARY=true
 
-# Install build-essential, pkg-config, default-libmysqlclient-dev, and git for C-extensions
+# Install build-essential, pkg-config, default-libmysqlclient-dev, git, and ca-certificates
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
@@ -25,14 +25,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Pre-install heavy PyPI dependencies into base image layer
-RUN pip install --no-cache-dir --prefer-binary \
-    -i https://mirrors.cloud.tencent.com/pypi/simple \
-    duckdb lancedb pyarrow pandas numpy scipy \
-    langchain langchain-core langchain-openai langgraph \
-    fastapi uvicorn starlette pydantic pymysql mysqlclient mcp \
-    sqlglot boto3 opendal requests python-dotenv pyyaml jinja2 \
-    clickhouse-connect databricks-sdk databricks-sql-connector \
-    google-cloud-bigquery google-auth \
-    && apt-get purge -y --auto-remove build-essential pkg-config \
-    && rm -rf /var/lib/apt/lists/* /tmp/* /root/.cache
+# Clone repo to resolve full requirements & setup files
+RUN git clone -b dev https://cdn.gh-proxy.org/https://github.com/CodeFindc/WrenAI.git /app || \
+    git clone -b dev https://mirror.ghproxy.com/https://github.com/CodeFindc/WrenAI.git /app
+
+# Pre-install core/wren, wren-langchain, and requirements.txt to bake all transitive PyPI dependencies into base image
+RUN pip install --no-cache-dir --prefer-binary -i https://mirrors.cloud.tencent.com/pypi/simple -e /app/core/wren[all] && \
+    cd /app/sdk/wren-langchain && \
+    sed -i 's/wren-engine/wrenai/g' pyproject.toml && \
+    pip install --no-cache-dir --prefer-binary -i https://mirrors.cloud.tencent.com/pypi/simple -e .[all] && \
+    cd /app/sdk/wren-langchain/examples && \
+    pip install --no-cache-dir --prefer-binary -i https://mirrors.cloud.tencent.com/pypi/simple -r requirements.txt && \
+    apt-get purge -y --auto-remove build-essential pkg-config git && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /root/.cache /app/.git
