@@ -1,12 +1,37 @@
-# Fast Application Image using pre-packaged Base Image (Builds in 2 seconds!)
-# Make sure to build the base image first: docker build -t wrenai-base:latest -f Dockerfile.base .
+# Stage 1: Clone repo and build frontend chat UI
+FROM node:20-slim AS frontend-builder
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone -b dev https://cdn.gh-proxy.org/https://github.com/CodeFindc/WrenAI.git /app
+RUN rm -rf /app/.git
+
+WORKDIR /app/sdk/wren-langchain/examples/wren-chat-ui
+RUN npm ci && npm run build && rm -rf node_modules
+
+# Stage 2: Fast Application Image inheriting pre-packaged Base Image (FROM wrenai-base:latest)
 FROM wrenai-base:latest
 
+WORKDIR /app
+
+# Copy pre-built UI and latest repository source code from Stage 1
+COPY --from=frontend-builder /app /app
+
+# Install local core/wren package, wren-langchain, and verify requirements.txt for any newly added dependencies
+RUN pip install --no-cache-dir -e /app/core/wren[all] && \
+    cd /app/sdk/wren-langchain && \
+    sed -i 's/wren-engine/wrenai/g' pyproject.toml && \
+    pip install --no-cache-dir -e .[all] && \
+    cd /app/sdk/wren-langchain/examples && \
+    pip install --no-cache-dir -r requirements.txt && \
+    rm -rf /tmp/* /root/.cache
+
 WORKDIR /app/sdk/wren-langchain/examples
-
-# Copy current application source code
-COPY . /app/sdk/wren-langchain/examples
-
 RUN chmod +x entrypoint.sh
 
 EXPOSE 8201 8202
