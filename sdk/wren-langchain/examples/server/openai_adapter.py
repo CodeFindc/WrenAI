@@ -9,7 +9,11 @@ import datetime
 from typing import Any
 from pydantic import BaseModel
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
-from examples.server.logging_config import get_logger
+
+try:
+    from server.logging_config import get_logger
+except ImportError:
+    from .logging_config import get_logger
 
 logger_sse = get_logger("sse")
 

@@ -16,6 +16,13 @@ import datetime
 from contextlib import asynccontextmanager, AsyncExitStack
 from typing import Any
 
+# Ensure both the `examples` directory and its parent directory are in sys.path
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+_parent_dir = os.path.dirname(_current_dir)
+for _p in [_current_dir, _parent_dir]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse, HTMLResponse, Response, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,39 +31,73 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMe
 
 from wren_langchain import WrenToolkit
 
-# Import server sub-modules
-from examples.server.logging_config import setup_logging, get_logger, request_id_var
-from examples.server.checkpointer import ReconnectingPyMySQLSaver
-from examples.server.mcp_client import (
-    mcp_sessions,
-    mcp_configs_registry,
-    mcp_exit_stacks,
-    global_mcp_tools,
-    initialized_mcp_servers,
-    mcp_manager_queue,
-    load_mcp_configs,
-    get_or_create_mcp_session,
-    convert_mcp_to_langchain,
-    mcp_manager_worker,
-    retry_failed_mcp_connections_loop,
-)
-from examples.server.agent_graph import build_app
-from examples.server.openai_adapter import (
-    OpenAIMessage,
-    OpenAIChatCompletionRequest,
-    get_exposed_openai_models,
-    convert_openai_messages,
-    get_openai_process_stream_mode,
-    get_openai_process_max_tool_chars,
-    get_openai_sse_keepalive_seconds,
-    get_openai_sse_keepalive_style,
-    sanitize_and_truncate_text,
-    format_process_tool_start,
-    format_process_tool_result,
-    format_process_progress,
-    make_chat_chunk,
-    make_sse_keepalive_chunk,
-)
+# Import server sub-modules with fallback support for all execution modes
+try:
+    from server.logging_config import setup_logging, get_logger, request_id_var
+    from server.checkpointer import ReconnectingPyMySQLSaver
+    from server.mcp_client import (
+        mcp_sessions,
+        mcp_configs_registry,
+        mcp_exit_stacks,
+        global_mcp_tools,
+        initialized_mcp_servers,
+        mcp_manager_queue,
+        load_mcp_configs,
+        get_or_create_mcp_session,
+        convert_mcp_to_langchain,
+        mcp_manager_worker,
+        retry_failed_mcp_connections_loop,
+    )
+    from server.agent_graph import build_app
+    from server.openai_adapter import (
+        OpenAIMessage,
+        OpenAIChatCompletionRequest,
+        get_exposed_openai_models,
+        convert_openai_messages,
+        get_openai_process_stream_mode,
+        get_openai_process_max_tool_chars,
+        get_openai_sse_keepalive_seconds,
+        get_openai_sse_keepalive_style,
+        sanitize_and_truncate_text,
+        format_process_tool_start,
+        format_process_tool_result,
+        format_process_progress,
+        make_chat_chunk,
+        make_sse_keepalive_chunk,
+    )
+except ImportError:
+    from examples.server.logging_config import setup_logging, get_logger, request_id_var
+    from examples.server.checkpointer import ReconnectingPyMySQLSaver
+    from examples.server.mcp_client import (
+        mcp_sessions,
+        mcp_configs_registry,
+        mcp_exit_stacks,
+        global_mcp_tools,
+        initialized_mcp_servers,
+        mcp_manager_queue,
+        load_mcp_configs,
+        get_or_create_mcp_session,
+        convert_mcp_to_langchain,
+        mcp_manager_worker,
+        retry_failed_mcp_connections_loop,
+    )
+    from examples.server.agent_graph import build_app
+    from examples.server.openai_adapter import (
+        OpenAIMessage,
+        OpenAIChatCompletionRequest,
+        get_exposed_openai_models,
+        convert_openai_messages,
+        get_openai_process_stream_mode,
+        get_openai_process_max_tool_chars,
+        get_openai_sse_keepalive_seconds,
+        get_openai_sse_keepalive_style,
+        sanitize_and_truncate_text,
+        format_process_tool_start,
+        format_process_tool_result,
+        format_process_progress,
+        make_chat_chunk,
+        make_sse_keepalive_chunk,
+    )
 
 # ── Structured Logging ────────────────────────────────────────────────
 logger = setup_logging()

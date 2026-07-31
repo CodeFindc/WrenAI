@@ -14,8 +14,13 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
 from wren_langchain import WrenToolkit
-from examples.server.logging_config import get_logger
-from examples.server.mcp_client import global_mcp_tools
+
+try:
+    from server.logging_config import get_logger
+    from server.mcp_client import global_mcp_tools
+except ImportError:
+    from .logging_config import get_logger
+    from .mcp_client import global_mcp_tools
 
 logger_llm = get_logger("llm")
 
