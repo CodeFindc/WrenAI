@@ -17,6 +17,8 @@ except ImportError:
 
 logger_sse = get_logger("sse")
 
+VIRTUAL_MODEL_ALIASES = {"wren-agent", "wrenai", "wren-semantic-analyst", "wren", "default"}
+
 
 class OpenAIMessage(BaseModel):
     role: str
@@ -39,18 +41,17 @@ def get_exposed_openai_models() -> list[str]:
     """Parse OPENAI_EXPOSED_MODELS environment variable (comma-separated). Fallback to defaults if empty."""
     raw = os.getenv("OPENAI_EXPOSED_MODELS", "").strip()
     if not raw:
-        models = ["wren-agent", "wren-semantic-analyst"]
+        models = ["wren-agent", "wrenai", "wren-semantic-analyst"]
     else:
         models = [m.strip() for m in raw.split(",") if m.strip()]
         if not models:
-            models = ["wren-agent", "wren-semantic-analyst"]
+            models = ["wren-agent", "wrenai", "wren-semantic-analyst"]
 
     env_model = os.getenv("LLM_MODEL_NAME", "").strip()
     if env_model and env_model not in models:
         models.insert(0, env_model)
 
     return models
-
 
 
 def convert_openai_messages(messages: list[OpenAIMessage]) -> list[BaseMessage]:

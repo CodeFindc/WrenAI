@@ -70,13 +70,14 @@ def test_get_exposed_openai_models(monkeypatch):
     """Test environment variable parsing for exposed OpenAI models."""
     monkeypatch.delenv("OPENAI_EXPOSED_MODELS", raising=False)
     monkeypatch.delenv("LLM_MODEL_NAME", raising=False)
-    assert get_exposed_openai_models() == ["wren-agent", "wren-semantic-analyst"]
+    assert get_exposed_openai_models() == ["wren-agent", "wrenai", "wren-semantic-analyst"]
 
     monkeypatch.setenv("LLM_MODEL_NAME", "Qwen3.6-27B")
-    assert get_exposed_openai_models() == ["Qwen3.6-27B", "wren-agent", "wren-semantic-analyst"]
+    assert get_exposed_openai_models() == ["Qwen3.6-27B", "wren-agent", "wrenai", "wren-semantic-analyst"]
 
     monkeypatch.setenv("OPENAI_EXPOSED_MODELS", "model-a, model-b, model-c")
     assert get_exposed_openai_models() == ["Qwen3.6-27B", "model-a", "model-b", "model-c"]
+
 
 
 

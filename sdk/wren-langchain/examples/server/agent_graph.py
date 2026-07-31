@@ -18,9 +18,11 @@ from wren_langchain import WrenToolkit
 try:
     from server.logging_config import get_logger
     from server.mcp_client import global_mcp_tools
+    from server.openai_adapter import VIRTUAL_MODEL_ALIASES
 except ImportError:
     from .logging_config import get_logger
     from .mcp_client import global_mcp_tools
+    from .openai_adapter import VIRTUAL_MODEL_ALIASES
 
 logger_llm = get_logger("llm")
 
@@ -67,14 +69,18 @@ def build_app(toolkit: WrenToolkit, checkpointer: Any = None, model_name: str = 
     api_base = os.getenv("LLM_API_BASE") or os.getenv("OPENAI_API_BASE")
     api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
 
-    # Determine target LLM model name
-    env_model = os.getenv("LLM_MODEL_NAME")
+    # Resolve physical backend LLM model name
+    # 1. If LLM_MODEL_NAME is explicitly set in env, it takes precedence as the physical backend LLM.
+    # 2. If request model_name is a virtual proxy alias (wren-agent, wrenai, wren-semantic-analyst, wren), map to real LLM backend.
+    # 3. Otherwise, use model_name directly.
+    env_model = os.getenv("LLM_MODEL_NAME", "").strip()
+
     if env_model:
         model_to_use = env_model
-    elif model_name and model_name not in ("wren-agent", "wren-semantic-analyst"):
-        model_to_use = model_name
+    elif not model_name or model_name.lower() in VIRTUAL_MODEL_ALIASES:
+        model_to_use = os.getenv("OPENAI_MODEL_NAME", "gpt-4o")
     else:
-        model_to_use = "gpt-4o"
+        model_to_use = model_name
 
     try:
         llm_request_timeout = float(os.getenv("LLM_REQUEST_TIMEOUT", "60"))
@@ -82,7 +88,7 @@ def build_app(toolkit: WrenToolkit, checkpointer: Any = None, model_name: str = 
         print(f"[WARN] Invalid LLM_REQUEST_TIMEOUT={os.getenv('LLM_REQUEST_TIMEOUT')!r}, using 60s")
         llm_request_timeout = 60.0
 
-    print(f"--- Configured LLM: {model_to_use} | API Base: {api_base or 'default'} | request_timeout={llm_request_timeout}s ---")
+    print(f"--- Configured LLM: {model_to_use} (request_alias={model_name}) | API Base: {api_base or 'default'} | request_timeout={llm_request_timeout}s ---")
 
     model_with_tools = None
 
@@ -130,7 +136,6 @@ def build_app(toolkit: WrenToolkit, checkpointer: Any = None, model_name: str = 
                 msg = f"LLM call failed: {second_err}"
                 logger_llm.error(f"invoke_failed {msg}")
                 raise RuntimeError(msg) from second_err
-
 
         duration_ms = int((time.perf_counter() - start_time) * 1000)
         has_tool_calls = bool(getattr(response, "tool_calls", None))
