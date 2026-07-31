@@ -1,0 +1,15 @@
+# Fast Application Image using pre-packaged CN Base Image (Builds in 2 seconds!)
+# Make sure to build the base image first: docker build -t wrenai-base:cn -f Dockerfile.cn.base .
+FROM wrenai-base:cn
+
+WORKDIR /app/sdk/wren-langchain/examples
+
+# Copy only current application source code
+COPY . /app/sdk/wren-langchain/examples
+
+RUN chmod +x entrypoint.sh
+
+EXPOSE 8201 8202
+
+ENTRYPOINT ["./entrypoint.sh"]
+CMD ["python3", "start_dual_services.py"]

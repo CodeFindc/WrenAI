@@ -1,0 +1,37 @@
+# Stage 1: Build & Pre-install frontend chat UI dependencies
+FROM node:20-slim AS frontend-base
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone -b dev https://cdn.gh-proxy.org/https://github.com/CodeFindc/WrenAI.git /app
+RUN rm -rf /app/.git
+
+WORKDIR /app/sdk/wren-langchain/examples/wren-chat-ui
+RUN npm ci && npm run build && rm -rf node_modules
+
+# Stage 2: Heavy Python Dependencies Pre-packaged Base Image (wrenai-base:latest)
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=frontend-base /app /app
+
+# Pre-install heavy PyPI dependencies
+RUN pip install --no-cache-dir -e /app/core/wren[all] && \
+    cd /app/sdk/wren-langchain && \
+    sed -i 's/wren-engine/wrenai/g' pyproject.toml && \
+    pip install --no-cache-dir -e .[all] && \
+    cd /app/sdk/wren-langchain/examples && \
+    pip install --no-cache-dir -r requirements.txt && \
+    apt-get purge -y --auto-remove build-essential git && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /root/.cache
