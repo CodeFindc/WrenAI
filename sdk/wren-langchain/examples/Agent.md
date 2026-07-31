@@ -1,7 +1,7 @@
 # Agent.md - Project Architectural Guidelines & Operational Boundary
 
 > **项目路径**：`D:\dev\WrenAI\sdk\wren-langchain\examples`  
-> **创建时间**：2026-07-31  
+> **更新时间**：2026-07-31  
 
 ---
 
@@ -28,6 +28,7 @@
 | **嵌入式测试数据库** | DuckDB | `examples/wren_project` 内内置 | 免配置开箱即用的本地查询引擎与样例数据集 |
 | **前端 Web UI** | React / Vite / TailwindCSS | `wren-chat-ui` | 提供离线可用的 Web 聊天客户端界面（托管于 Track B `/` 路径） |
 | **容器与部署** | Docker / Docker Compose | 多阶段镜像构建 | 支持标准构建及 `Dockerfile.cn` / `docker-compose.cn.yaml` 中国大陆加速构建 |
+| **测试框架** | pytest / TestClient | `pytest>=8` | 为 `examples` 模块提供自动化接口契约与单元测试 |
 
 ---
 
@@ -38,6 +39,12 @@
  示例编排层 (examples/ 目录)
  ├── Track A: wren_mcp_server.py (FastMCP 端口 8202)
  └── Track B: langgraph_fastapi_multi.py (FastAPI 端口 8201)
+       └── 模块解耦层 (examples/server/ 子模块)
+             ├── logging_config.py   (结构化日志与 ContextVar 追踪)
+             ├── checkpointer.py     (ReconnectingPyMySQLSaver 自动重连持久化)
+             ├── mcp_client.py       (动态 MCP 客户端发现与管理)
+             ├── agent_graph.py      (LangGraph ReAct 状态图构建)
+             └── openai_adapter.py   (OpenAI 协议转换与 SSE 思考流生成)
          │
          │ 依赖 WrenToolkit (from_project / get_tools / system_prompt)
          ▼
@@ -128,7 +135,9 @@ MCP Client (如 DEEIX-Chat)
 
 | 文件/目录 | 核心职责与功能描述 |
 |---|---|
-| `langgraph_fastapi_multi.py` | **Track B 核心服务**：支持 OpenAI 协议适配、多轮会话持久化、动态 MCP 客户端发现、SSE 思考流与 Web UI 托管 |
+| `langgraph_fastapi_multi.py` | **Track B 主服务入口**：组合 server 子模块，提供 REST/OpenAI 端点、会话持久化与 Web UI 托管 |
+| `server/` | **服务功能模块解耦目录**：包含 `logging_config.py`, `checkpointer.py`, `mcp_client.py`, `agent_graph.py`, `openai_adapter.py` |
+| `tests/` | **自动化测试套件**：针对 Track A & Track B 服务的契约测试、断线重连测试与消息转换单测（`pytest examples/tests`） |
 | `wren_mcp_server.py` | **Track A 核心服务**：FastMCP 双传输（SSE + Streamable HTTP）服务器，暴露 Wren 语义工具 |
 | `start_dual_services.py` | **双服务启动器**：通过 Python 多进程并发拉起 8201 (Track B) 与 8202 (Track A) 服务 |
 | `langchain_demo.py` | 极简 SDK 示例 1：演示高层 `create_agent` 工厂接口 |

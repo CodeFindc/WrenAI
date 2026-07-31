@@ -76,6 +76,17 @@ A committed DuckDB-backed sample project lives at `examples/wren_project` — ru
 
 ---
 
+## Automated Tests
+
+Run the automated test suite covering Track A (MCP server), Track B (FastAPI server & OpenAI adapter), checkpointers, and formatters:
+
+```bash
+pytest examples/tests -v
+```
+
+---
+
+
 ## Environment Variables Reference
 
 The Dual-Track services (FastMCP dual-transport MCP and OpenAI-compatible API) can be fully customized via environment variables:

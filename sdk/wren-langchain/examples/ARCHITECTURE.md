@@ -126,9 +126,12 @@ wren-engine（wren-core 的 Python 包：语义引擎本体）
 
 **示例对库的使用**：仅用三原语，外加两处读取私有属性 `toolkit._memory.enabled` 做状态展示（`langgraph_demo.py:145`、`langgraph_fastapi_multi.py:1215`）——这是示例越过公开 API 的唯一地方。
 
-### 3.2 Track B：`langgraph_fastapi_multi.py`
+### 3.2 Track B：`langgraph_fastapi_multi.py` 及 `server/` 子模块
+
+为了解耦单文件巨石架构，底层子组件已解耦拆分至 `examples/server/` 子模块（包含 `logging_config.py`, `checkpointer.py`, `mcp_client.py`, `agent_graph.py`, `openai_adapter.py`），同时 `langgraph_fastapi_multi.py` 保持作为对外暴露 `app` 的主入口文件。
 
 按职责分块：
+
 
 **应用骨架与生命周期**
 - `FastAPI(...)`（945–952），CORS 全开（955–961）。
