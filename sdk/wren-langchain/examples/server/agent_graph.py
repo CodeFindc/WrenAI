@@ -66,7 +66,15 @@ def build_app(toolkit: WrenToolkit, checkpointer: Any = None, model_name: str = 
 
     api_base = os.getenv("LLM_API_BASE") or os.getenv("OPENAI_API_BASE")
     api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
-    model_to_use = os.getenv("LLM_MODEL_NAME", model_name)
+
+    # Determine target LLM model name
+    env_model = os.getenv("LLM_MODEL_NAME")
+    if env_model:
+        model_to_use = env_model
+    elif model_name and model_name not in ("wren-agent", "wren-semantic-analyst"):
+        model_to_use = model_name
+    else:
+        model_to_use = "gpt-4o"
 
     try:
         llm_request_timeout = float(os.getenv("LLM_REQUEST_TIMEOUT", "60"))
@@ -74,20 +82,21 @@ def build_app(toolkit: WrenToolkit, checkpointer: Any = None, model_name: str = 
         print(f"[WARN] Invalid LLM_REQUEST_TIMEOUT={os.getenv('LLM_REQUEST_TIMEOUT')!r}, using 60s")
         llm_request_timeout = 60.0
 
-    print(f"--- Configured LLM: {model_to_use} | API Base: {api_base} | request_timeout={llm_request_timeout}s ---")
+    print(f"--- Configured LLM: {model_to_use} | API Base: {api_base or 'default'} | request_timeout={llm_request_timeout}s ---")
 
     model_with_tools = None
 
     def get_model() -> Any:
         nonlocal model_with_tools
         if model_with_tools is None:
+            # Pass extra_body directly as top-level parameter to avoid UserWarning
             model_with_tools = ChatOpenAI(
                 model=model_to_use,
                 base_url=api_base,
                 api_key=api_key,
                 temperature=0,
                 request_timeout=llm_request_timeout,
-                model_kwargs={"extra_body": {"option": {"num_ctx": 1048576}}},
+                extra_body={"option": {"num_ctx": 1048576}},
             ).bind_tools(tools)
         return model_with_tools
 
@@ -103,7 +112,14 @@ def build_app(toolkit: WrenToolkit, checkpointer: Any = None, model_name: str = 
             model = get_model()
             response = model.invoke(messages)
         except Exception as e:
-            logger_llm.warning(f"invoke_retry LLM call failed: {e}. Resetting client connection pool and retrying...")
+            err_str = str(e)
+            if "404" in err_str or "NotFound" in err_str:
+                logger_llm.error(
+                    f"invoke_failed LLM model '{model_to_use}' not found at API base '{api_base or 'default'}': {e}. "
+                    f"Please check LLM_MODEL_NAME environment variable or verify the model is deployed."
+                )
+            else:
+                logger_llm.warning(f"invoke_retry LLM call failed: {e}. Resetting client connection pool and retrying...")
             model_with_tools = None
             model = get_model()
             response = model.invoke(messages)
