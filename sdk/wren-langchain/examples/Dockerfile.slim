@@ -1,0 +1,52 @@
+# Stage 1: Build the frontend chat UI and pre-clone repo (Slim Base)
+FROM node:20-slim AS frontend-builder
+
+WORKDIR /app
+
+# Install git to clone
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone the dev branch of WrenAI repository
+RUN git clone -b dev https://cdn.gh-proxy.org/https://github.com/CodeFindc/WrenAI.git /app
+
+# Remove .git history folder to save image space (~100-300MB)
+RUN rm -rf /app/.git
+
+# Install dependencies and build the frontend chat UI
+WORKDIR /app/sdk/wren-langchain/examples/wren-chat-ui
+RUN npm ci && npm run build && rm -rf node_modules
+
+# Stage 2: Final lightweight python slim image (Optimized ~2.2GB)
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install runtime dependencies and build tools, then purge build-essential and clean cache
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy pre-built frontend and lean source code from Stage 1
+COPY --from=frontend-builder /app /app
+
+# Install core/wren package, wren-langchain, and examples requirements with no cache
+RUN pip install --no-cache-dir -e /app/core/wren[all] && \
+    cd /app/sdk/wren-langchain && \
+    sed -i 's/wren-engine/wrenai/g' pyproject.toml && \
+    pip install --no-cache-dir -e .[all] && \
+    cd /app/sdk/wren-langchain/examples && \
+    pip install --no-cache-dir -r requirements.txt && \
+    apt-get purge -y --auto-remove build-essential git && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /root/.cache
+
+WORKDIR /app/sdk/wren-langchain/examples
+RUN chmod +x entrypoint.sh
+
+EXPOSE 8201 8202
+
+ENTRYPOINT ["./entrypoint.sh"]
+CMD ["python3", "start_dual_services.py"]
