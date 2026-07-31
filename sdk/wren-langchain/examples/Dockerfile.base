@@ -21,6 +21,8 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    pkg-config \
+    default-libmysqlclient-dev \
     git \
     && rm -rf /var/lib/apt/lists/*
 
@@ -33,5 +35,5 @@ RUN pip install --no-cache-dir -e /app/core/wren[all] && \
     pip install --no-cache-dir -e .[all] && \
     cd /app/sdk/wren-langchain/examples && \
     pip install --no-cache-dir -r requirements.txt && \
-    apt-get purge -y --auto-remove build-essential git && \
+    apt-get purge -y --auto-remove build-essential pkg-config git && \
     rm -rf /var/lib/apt/lists/* /tmp/* /root/.cache
