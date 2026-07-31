@@ -106,15 +106,16 @@ The Dual-Track services (FastMCP dual-transport MCP and OpenAI-compatible API) c
 |---|---|---|
 | `OPENAI_API_KEY` | API Key for upstream LLM used by LangGraph agent logic. | `sk-proj-...` |
 | `LLM_API_BASE` / `OPENAI_API_BASE` | Base URL for LLM service (supports vLLM, Ollama, OneAPI, DeepSeek, etc.). | `http://192.168.110.209:8200/v1` |
-| `LLM_MODEL_NAME` | Model name passed to the upstream LLM provider. | `gpt-4o` or `Qwen3.6-27B` |
+| `LLM_MODEL_NAME` | Physical model name deployed on the upstream LLM provider. Virtual request aliases (`wrenai`, `wren-agent`, `wren-semantic-analyst`) are automatically mapped to this target model. | `Qwen2.5-72B-Instruct` or `gpt-4o` |
 | `LLM_REQUEST_TIMEOUT` | Upstream LLM HTTP request timeout in seconds. Long tool-heavy turns with large contexts can exceed the old hard-coded 60s and get false-killed. | `60` |
 
 ### 3. Track B OpenAI Adapter & Thinking Stream
 | Variable | Description | Default / Example |
 |---|---|---|
-| `OPENAI_EXPOSED_MODELS` | Virtual model IDs returned by `GET /v1/models` (comma-separated). | `wren-agent,wren-semantic-analyst` |
+| `OPENAI_EXPOSED_MODELS` | Virtual model IDs returned by `GET /v1/models` (comma-separated). Automatically includes `LLM_MODEL_NAME` when configured. | `wren-agent,wrenai,wren-semantic-analyst` |
 | `OPENAI_PROCESS_STREAM_MODE` | ReAct reasoning & tool execution trace mode: `reasoning` (default, emits `delta.reasoning_content` for UI thinking trace), `text` (inline), `both`, or `off`. | `reasoning` |
 | `OPENAI_PROCESS_MAX_TOOL_CHARS` | Character truncation limit for tool execution summary in thinking trace. | `400` |
+
 
 ### 4. SSE Stream Keepalive (Prevent Client Idle Timeout)
 | Variable | Description | Default / Example |

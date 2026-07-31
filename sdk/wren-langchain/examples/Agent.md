@@ -28,7 +28,7 @@
 | **嵌入式测试数据库** | DuckDB | `examples/wren_project` 内内置 | 免配置开箱即用的本地查询引擎与样例数据集 |
 | **前端 Web UI** | React / Vite / TailwindCSS | `wren-chat-ui` | 提供离线可用的 Web 聊天客户端界面（托管于 Track B `/` 路径） |
 | **容器与部署** | Docker / Docker Compose | 多阶段镜像构建 | 支持标准构建及 `Dockerfile.cn` / `docker-compose.cn.yaml` 中国大陆加速构建 |
-| **测试框架** | pytest / TestClient | `pytest>=8` | 为 `examples` 模块提供自动化接口契约与单元测试 |
+| **测试框架** | pytest / TestClient | `pytest>=8` | 为 `examples` 模块提供自动化接口契约与单元测试（14 项测试 100% 通过） |
 
 ---
 
@@ -39,12 +39,12 @@
  示例编排层 (examples/ 目录)
  ├── Track A: wren_mcp_server.py (FastMCP 端口 8202)
  └── Track B: langgraph_fastapi_multi.py (FastAPI 端口 8201)
-       └── 模块解耦层 (examples/server/ 子模块)
-             ├── logging_config.py   (结构化日志与 ContextVar 追踪)
+       └── 模块解耦层 (examples/server/ 子模块，支持 server.* 与 examples.server.* 双路径兼容)
+             ├── logging_config.py   (结构化日志与 ContextVar 请求追踪)
              ├── checkpointer.py     (ReconnectingPyMySQLSaver 自动重连持久化)
-             ├── mcp_client.py       (动态 MCP 客户端发现与管理)
-             ├── agent_graph.py      (LangGraph ReAct 状态图构建)
-             └── openai_adapter.py   (OpenAI 协议转换与 SSE 思考流生成)
+             ├── mcp_client.py       (动态 MCP 客户端发现与重连管理)
+             ├── agent_graph.py      (LangGraph ReAct 状态图与虚拟别名转发)
+             └── openai_adapter.py   (OpenAI 协议转换、模型暴露与 SSE 思考流生成)
          │
          │ 依赖 WrenToolkit (from_project / get_tools / system_prompt)
          ▼
@@ -82,8 +82,8 @@ graph TD
     WrenToolkit --> WrenEngine[WrenEngine Semantic Layer]
 ```
 
-- **Track A (端口 8202)**：暴露原始语义层工具供上游 LLM 自行决定 ReAct 逻辑。
-- **Track B (端口 8201)**：包含完整黑盒 Agent 逻辑，向外提供 `/v1/chat/completions` 与 `/chat/stream`，支持 SSE 增量 Thinking/Reasoning 思考流输出。
+- **Track A (端口 8202)**：暴露原始语义层工具供上游 LLM 自行决定 ReAct 逻辑。提供依赖预检（缺失 `mcp` 时优雅跳过）与最大重启上限保护（`MAX_MCP_RESTARTS = 5`）。
+- **Track B (端口 8201)**：包含完整黑盒 Agent 逻辑，向外提供 `/v1/chat/completions` 与 `/chat/stream`，支持 SSE 增量 Thinking/Reasoning 思考流输出，并将虚拟模型别名（如 `wrenai` / `wren-agent`）自动映射至后端物理 LLM。
 
 ---
 
@@ -91,11 +91,14 @@ graph TD
 
 ### 流程 1: Track B OpenAI 协议请求与 ReAct 执行流
 ```
-客户端 (POST /v1/chat/completions)
+客户端 (POST /v1/chat/completions，包含 model: "wrenai" 或 "wren-agent")
    │
    ├──> 1. 转换请求参数为 LangChain 消息列表 (convert_openai_messages)
    ├──> 2. 获取/初始化 LangGraph 实例 (langgraph_app_stateless 或 langgraph_app)
-   ├──> 3. 运行 Agent Node: 注入 Wren系统 Prompt，调用 ChatOpenAI bind_tools
+   ├──> 3. 运行 Agent Node: 注入 Wren 系统 Prompt，解析虚拟模型别名:
+   │       ├──> 若识别为虚拟别名 (wrenai / wren-agent / wren-semantic-analyst):
+   │       │      └──> 自动映射至物理后端 LLM 名称 (LLM_MODEL_NAME，如 Qwen2.5-72B)
+   │       ├──> 调用 ChatOpenAI bind_tools (透传 extra_body，规避 UserWarning)
    │       ├──> 若 LLM 决定调用工具 (tool_calls):
    │       │      ├──> 跳转到 ToolNode 节点
    │       │      ├──> 执行对应工具 (wren_query / wren_dry_plan 等)
@@ -139,7 +142,7 @@ MCP Client (如 DEEIX-Chat)
 | `server/` | **服务功能模块解耦目录**：包含 `logging_config.py`, `checkpointer.py`, `mcp_client.py`, `agent_graph.py`, `openai_adapter.py` |
 | `tests/` | **自动化测试套件**：针对 Track A & Track B 服务的契约测试、断线重连测试与消息转换单测（`pytest examples/tests`） |
 | `wren_mcp_server.py` | **Track A 核心服务**：FastMCP 双传输（SSE + Streamable HTTP）服务器，暴露 Wren 语义工具 |
-| `start_dual_services.py` | **双服务启动器**：通过 Python 多进程并发拉起 8201 (Track B) 与 8202 (Track A) 服务 |
+| `start_dual_services.py` | **双服务启动器**：带有 `mcp` 依赖预检与最大 5 次重启上限防死循环保护的双轨启动器 |
 | `langchain_demo.py` | 极简 SDK 示例 1：演示高层 `create_agent` 工厂接口 |
 | `langgraph_demo.py` | 极简 SDK 示例 2：演示使用 LangGraph 原语手动构建 ReAct 图 |
 | `generate_profile.py` | Profile 辅助脚本：从环境变量生成 `.wren/profiles.yml` 数据源配置 |
