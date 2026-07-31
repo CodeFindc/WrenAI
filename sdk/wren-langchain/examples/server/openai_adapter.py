@@ -39,9 +39,18 @@ def get_exposed_openai_models() -> list[str]:
     """Parse OPENAI_EXPOSED_MODELS environment variable (comma-separated). Fallback to defaults if empty."""
     raw = os.getenv("OPENAI_EXPOSED_MODELS", "").strip()
     if not raw:
-        return ["wren-agent", "wren-semantic-analyst"]
-    ids = [m.strip() for m in raw.split(",") if m.strip()]
-    return ids or ["wren-agent", "wren-semantic-analyst"]
+        models = ["wren-agent", "wren-semantic-analyst"]
+    else:
+        models = [m.strip() for m in raw.split(",") if m.strip()]
+        if not models:
+            models = ["wren-agent", "wren-semantic-analyst"]
+
+    env_model = os.getenv("LLM_MODEL_NAME", "").strip()
+    if env_model and env_model not in models:
+        models.insert(0, env_model)
+
+    return models
+
 
 
 def convert_openai_messages(messages: list[OpenAIMessage]) -> list[BaseMessage]:

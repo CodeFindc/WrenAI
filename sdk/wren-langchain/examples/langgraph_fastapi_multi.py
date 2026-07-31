@@ -597,8 +597,13 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
             }
         except Exception as e:
             duration_ms = int((time.perf_counter() - sync_start_time) * 1000)
-            logger_api.error(f"request_fail route=/v1/chat/completions duration_ms={duration_ms} error={e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Execution error: {str(e)}")
+            err_msg = str(e)
+            if "404" in err_msg or "NotFound" in err_msg or "not found" in err_msg.lower():
+                logger_api.error(f"request_fail route=/v1/chat/completions duration_ms={duration_ms} error={err_msg}")
+            else:
+                logger_api.error(f"request_fail route=/v1/chat/completions duration_ms={duration_ms} error={err_msg}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"LLM execution error: {err_msg}")
+
 
     async def event_stream_generator():
         request_id_var.set(completion_id)

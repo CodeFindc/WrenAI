@@ -111,18 +111,26 @@ def build_app(toolkit: WrenToolkit, checkpointer: Any = None, model_name: str = 
         try:
             model = get_model()
             response = model.invoke(messages)
-        except Exception as e:
-            err_str = str(e)
-            if "404" in err_str or "NotFound" in err_str:
-                logger_llm.error(
-                    f"invoke_failed LLM model '{model_to_use}' not found at API base '{api_base or 'default'}': {e}. "
+        except Exception as first_err:
+            err_str = str(first_err)
+            if "404" in err_str or "NotFound" in err_str or "Model not found" in err_str:
+                msg = (
+                    f"LLM model '{model_to_use}' not found at API base '{api_base or 'default'}' (Error 404). "
                     f"Please check LLM_MODEL_NAME environment variable or verify the model is deployed."
                 )
-            else:
-                logger_llm.warning(f"invoke_retry LLM call failed: {e}. Resetting client connection pool and retrying...")
+                logger_llm.error(f"invoke_failed {msg}")
+                raise RuntimeError(msg) from first_err
+
+            logger_llm.warning(f"invoke_retry LLM call failed: {first_err}. Resetting client connection pool and retrying...")
             model_with_tools = None
-            model = get_model()
-            response = model.invoke(messages)
+            try:
+                model = get_model()
+                response = model.invoke(messages)
+            except Exception as second_err:
+                msg = f"LLM call failed: {second_err}"
+                logger_llm.error(f"invoke_failed {msg}")
+                raise RuntimeError(msg) from second_err
+
 
         duration_ms = int((time.perf_counter() - start_time) * 1000)
         has_tool_calls = bool(getattr(response, "tool_calls", None))
