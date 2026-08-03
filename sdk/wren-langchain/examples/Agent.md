@@ -95,7 +95,9 @@ graph TD
    │
    ├──> 1. 转换请求参数为 LangChain 消息列表 (convert_openai_messages)
    ├──> 2. 获取/初始化 LangGraph 实例 (langgraph_app_stateless 或 langgraph_app)
-   ├──> 3. 运行 Agent Node: 注入 Wren 系统 Prompt，解析虚拟模型别名:
+   ├──> 3. 运行 Agent Node: 自动归集与注入 Wren 系统 Prompt (ensure_wren_system_prompt)，解析虚拟模型别名:
+   │       ├──> 提示词获取源: WrenToolkit.system_prompt() (包含 wren_query/wren_dry_plan/wren_list_models 使用指南)
+   │       ├──> 防错归集: 将包含 Wren 提示词及 DEEIX 文件上下文的所有 SystemMessage 统一归集至消息列表最头部 (Index 0)
    │       ├──> 若识别为虚拟别名 (wrenai / wren-agent / wren-semantic-analyst):
    │       │      └──> 自动映射至物理后端 LLM 名称 (LLM_MODEL_NAME，如 Qwen2.5-72B)
    │       ├──> 调用 ChatOpenAI bind_tools (透传 extra_body，规避 UserWarning)

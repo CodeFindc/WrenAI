@@ -86,6 +86,34 @@ pytest examples/tests -v
 
 ---
 
+## Wren System Prompt & Tool Instructions (系统提示词位置与注入机制)
+
+WrenAI 语义引擎在与大模型 (LLM) 交互时，依赖专属的 **Wren System Prompt**（系统提示词）来指导 LLM 如何使用 6 大核心语义工具进行表结构探索、向量召回、SQL 推演及校验发包。
+
+### 1. 提示词定义源 (Definition Source)
+- **底层 SDK 定义**：系统提示词在 `wren_langchain` 包的 `WrenToolkit` 中通过 `toolkit.system_prompt()` 统一生成与维护。提示词内包含了使用 `wren_list_models`、`wren_fetch_context`、`wren_dry_plan` 和 `wren_query` 的核心规范与约束。
+
+### 2. 源码位置与注入节点 (Code Locations & Injection Points)
+
+| 场景 / 轨道 | 源码文件 | 核心函数 / 节点 | 运行机制 |
+|---|---|---|---|
+| **Track B (FastAPI Agent)** | [`examples/server/agent_graph.py`](file:///D:/dev/WrenAI/sdk/wren-langchain/examples/server/agent_graph.py#L40-L60) | `ensure_wren_system_prompt()` | 在 ReAct 节点 `agent_node` 调用 `ChatOpenAI.invoke()` 前，自动将 `toolkit.system_prompt()` 放置在消息列表最头部（Index 0）。即便前端或 DEEIX-Chat 上传文件将 `SystemMessage` 放在列表中后部，也会自动归集至最前面，完全规避上游 400 报错。 |
+| **Track A (FastMCP Engine)** | [`examples/wren_mcp_server.py`](file:///D:/dev/WrenAI/sdk/wren-langchain/examples/wren_mcp_server.py#L180-L190) | `@mcp.tool` `wren_get_system_prompt()` | 暴露 MCP 工具供外部客户端（如 DEEIX-Chat、Dify、Open-WebUI 等）主动拉取 Wren 语义提示词，以便客户端在前端/本地编排 LLM 的 System Prompt。 |
+
+### 3. 如何自定义与拓展系统提示词 (Customization Guide)
+若需要在默认 Wren 语义提示词的基础上增加业务规则（例如指定输出语言、数据脱敏要求或行业术语映射），可在 [`examples/server/agent_graph.py`](file:///D:/dev/WrenAI/sdk/wren-langchain/examples/server/agent_graph.py) 的 `build_app` 或 `agent_node` 中进行叠加：
+
+```python
+# 在 agent_graph.py 中自定义叠加提示词
+base_prompt = toolkit.system_prompt()
+custom_prompt = base_prompt + "\n\n【业务规则】: 所有分析结论必须使用中文回复，并附带 SQL 计算逻辑说明。"
+
+# ensure_wren_system_prompt 会自动将其作为顶层 SystemMessage 注入
+messages = ensure_wren_system_prompt(messages, custom_prompt)
+```
+
+---
+
 
 ## Environment Variables Reference
 
