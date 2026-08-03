@@ -26,17 +26,13 @@ RUN npm config set registry https://registry.npmmirror.com && \
 RUN pip install --no-cache-dir --prefer-binary -i https://mirrors.cloud.tencent.com/pypi/simple \
     sqlalchemy psycopg2-binary pymysql mysqlclient duckdb clickhouse-connect
 
-WORKDIR /project
-
-# Copy project source code and offline skills into container
+# Copy project source code and entrypoint script into container
 COPY . /app/sdk/wren-langchain/examples
 
-# Ensure .claude skills are available in project working directory
-RUN mkdir -p /project/.claude/skills && \
-    cp -r /app/sdk/wren-langchain/examples/.claude/skills/* /project/.claude/skills/ 2>/dev/null || true
+WORKDIR /app/sdk/wren-langchain/examples
+RUN chmod +x entrypoint.claude.sh
 
-ENV ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-http://192.168.110.209:8200/v1}
-ENV ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-sk-dummy}
+EXPOSE 8201 8202
 
-ENTRYPOINT ["claude"]
-CMD ["--help"]
+ENTRYPOINT ["./entrypoint.claude.sh"]
+CMD ["python3", "start_dual_services.py"]
