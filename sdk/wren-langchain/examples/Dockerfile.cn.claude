@@ -1,0 +1,42 @@
+# Containerized Claude CLI for Automated Data Source Onboarding & MDL Generation (CN Accelerated)
+# Inherits pre-packaged CN Base Image (FROM wrenai-base:cn)
+FROM wrenai-base:cn
+
+WORKDIR /app
+
+# Configure APT to allow HTTPS connections prior to ca-certificates installation (Tencent Cloud Mirror)
+RUN echo 'Acquire::https::Verify-Peer "false";' > /etc/apt/apt.conf.d/99ssl-trust && \
+    echo 'Acquire::https::Verify-Host "false";' >> /etc/apt/apt.conf.d/99ssl-trust && \
+    (sed -i 's/http:\/\//https:\/\//g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true) && \
+    (sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true) && \
+    (sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list 2>/dev/null || true)
+
+# Install Node.js 20 & Claude Code CLI using npmmirror
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm config set registry https://registry.npmmirror.com && \
+    npm install -g @anthropic-ai/claude-code
+
+# Pre-install SQLAlchemy and additional database drivers for schema discovery
+RUN pip install --no-cache-dir --prefer-binary -i https://mirrors.cloud.tencent.com/pypi/simple \
+    sqlalchemy psycopg2-binary pymysql mysqlclient duckdb clickhouse-connect
+
+WORKDIR /project
+
+# Copy project source code and offline skills into container
+COPY . /app/sdk/wren-langchain/examples
+
+# Ensure .claude skills are available in project working directory
+RUN mkdir -p /project/.claude/skills && \
+    cp -r /app/sdk/wren-langchain/examples/.claude/skills/* /project/.claude/skills/ 2>/dev/null || true
+
+ENV ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-http://192.168.110.209:8200/v1}
+ENV ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-sk-dummy}
+
+ENTRYPOINT ["claude"]
+CMD ["--help"]

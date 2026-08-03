@@ -1,0 +1,34 @@
+# Containerized Claude CLI for Automated Data Source Onboarding & MDL Generation (Standard)
+# Inherits pre-packaged Base Image (FROM wrenai-base:latest)
+FROM wrenai-base:latest
+
+WORKDIR /app
+
+# Install Node.js 20 & Claude Code CLI
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @anthropic-ai/claude-code
+
+# Pre-install SQLAlchemy and additional database drivers for schema discovery
+RUN pip install --no-cache-dir \
+    sqlalchemy psycopg2-binary pymysql mysqlclient duckdb clickhouse-connect
+
+WORKDIR /project
+
+# Copy project source code and offline skills into container
+COPY . /app/sdk/wren-langchain/examples
+
+# Ensure .claude skills are available in project working directory
+RUN mkdir -p /project/.claude/skills && \
+    cp -r /app/sdk/wren-langchain/examples/.claude/skills/* /project/.claude/skills/ 2>/dev/null || true
+
+ENV ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-http://192.168.110.209:8200/v1}
+ENV ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-sk-dummy}
+
+ENTRYPOINT ["claude"]
+CMD ["--help"]
