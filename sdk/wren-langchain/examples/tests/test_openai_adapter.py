@@ -53,6 +53,21 @@ def test_convert_openai_messages():
     assert lc_msgs[3].tool_call_id == "tc_1"
 
 
+def test_convert_openai_messages_out_of_order_system():
+    """Test that out-of-order system messages (e.g. from file upload) are grouped at the head."""
+    raw_msgs = [
+        OpenAIMessage(role="user", content="Analyze file"),
+        OpenAIMessage(role="system", content="[File Attachment Context] ID, Name, Value"),
+    ]
+    lc_msgs = convert_openai_messages(raw_msgs)
+    assert len(lc_msgs) == 2
+    assert isinstance(lc_msgs[0], SystemMessage)
+    assert isinstance(lc_msgs[1], HumanMessage)
+    assert lc_msgs[0].content == "[File Attachment Context] ID, Name, Value"
+    assert lc_msgs[1].content == "Analyze file"
+
+
+
 def test_sanitize_and_truncate_text():
     """Test secret redaction and character truncation."""
     secret_text = "Database connection: mysql://root:password=my_secret_pwd@localhost:3306/db"

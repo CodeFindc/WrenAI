@@ -55,8 +55,13 @@ def get_exposed_openai_models() -> list[str]:
 
 
 def convert_openai_messages(messages: list[OpenAIMessage]) -> list[BaseMessage]:
-    """Convert a list of OpenAI API format messages into LangChain BaseMessage objects."""
-    lc_messages = []
+    """Convert a list of OpenAI API format messages into LangChain BaseMessage objects.
+    
+    Ensures all SystemMessage instances (e.g. from file upload context or client prompts)
+    are grouped at the beginning to comply with strict LLM chat templates.
+    """
+    system_messages = []
+    other_messages = []
     for msg in messages:
         content = msg.content or ""
         if isinstance(content, list):
@@ -64,15 +69,17 @@ def convert_openai_messages(messages: list[OpenAIMessage]) -> list[BaseMessage]:
             content = " ".join(parts)
 
         role = msg.role.lower()
-        if role == "user":
-            lc_messages.append(HumanMessage(content=content))
+        if role == "system":
+            system_messages.append(SystemMessage(content=content))
+        elif role == "user":
+            other_messages.append(HumanMessage(content=content))
         elif role == "assistant":
-            lc_messages.append(AIMessage(content=content))
-        elif role == "system":
-            lc_messages.append(SystemMessage(content=content))
+            other_messages.append(AIMessage(content=content))
         elif role == "tool":
-            lc_messages.append(ToolMessage(content=content, tool_call_id=msg.tool_call_id or "tool_call"))
-    return lc_messages
+            other_messages.append(ToolMessage(content=content, tool_call_id=msg.tool_call_id or "tool_call"))
+
+    return system_messages + other_messages
+
 
 
 def get_openai_process_stream_mode() -> str:

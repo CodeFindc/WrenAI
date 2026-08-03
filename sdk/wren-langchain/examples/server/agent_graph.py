@@ -38,21 +38,27 @@ def get_current_time() -> str:
 
 
 def ensure_wren_system_prompt(messages: list[BaseMessage], system_prompt: str) -> list[BaseMessage]:
-    """Ensure the Wren system prompt is present in the message list without duplicating or overriding existing system slots."""
-    if not system_prompt:
-        return list(messages)
+    """Ensure all SystemMessages (including Wren system prompt & client file context) are grouped at the very beginning of the message list.
 
+    This prevents HTTP 400 'System message must be at the beginning' errors from strict LLM providers (e.g., vLLM / Qwen).
+    """
+    sys_messages = []
+    other_messages = []
+
+    has_wren_prompt = False
     for msg in messages:
-        if isinstance(msg, SystemMessage) and msg.content == system_prompt:
-            return list(messages)
+        if isinstance(msg, SystemMessage):
+            if system_prompt and msg.content == system_prompt:
+                has_wren_prompt = True
+            sys_messages.append(msg)
+        else:
+            other_messages.append(msg)
 
-    insert_idx = 0
-    while insert_idx < len(messages) and isinstance(messages[insert_idx], SystemMessage):
-        insert_idx += 1
+    if system_prompt and not has_wren_prompt:
+        sys_messages.insert(0, SystemMessage(content=system_prompt))
 
-    new_messages = list(messages)
-    new_messages.insert(insert_idx, SystemMessage(content=system_prompt))
-    return new_messages
+    return sys_messages + other_messages
+
 
 
 def build_app(toolkit: WrenToolkit, checkpointer: Any = None, model_name: str = "gpt-4o") -> Any:
