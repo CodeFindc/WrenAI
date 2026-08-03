@@ -54,7 +54,7 @@ def test_convert_openai_messages():
 
 
 def test_convert_openai_messages_out_of_order_system():
-    """Test that out-of-order system messages (e.g. from file upload) are grouped at the head."""
+    """Test that out-of-order system messages are merged into a single SystemMessage at the head."""
     raw_msgs = [
         OpenAIMessage(role="user", content="Analyze file"),
         OpenAIMessage(role="system", content="[File Attachment Context] ID, Name, Value"),
@@ -65,6 +65,23 @@ def test_convert_openai_messages_out_of_order_system():
     assert isinstance(lc_msgs[1], HumanMessage)
     assert lc_msgs[0].content == "[File Attachment Context] ID, Name, Value"
     assert lc_msgs[1].content == "Analyze file"
+
+
+def test_convert_multiple_system_messages_consolidated():
+    """Test that multiple system messages (e.g. System Prompt + Client Preset) are merged into EXACTLY ONE SystemMessage at index 0."""
+    raw_msgs = [
+        OpenAIMessage(role="system", content="Wren System Prompt"),
+        OpenAIMessage(role="user", content="User Question"),
+        OpenAIMessage(role="system", content="Client Custom Instruction"),
+    ]
+    lc_msgs = convert_openai_messages(raw_msgs)
+    assert len(lc_msgs) == 2
+    assert isinstance(lc_msgs[0], SystemMessage)
+    assert isinstance(lc_msgs[1], HumanMessage)
+    assert "Wren System Prompt" in lc_msgs[0].content
+    assert "Client Custom Instruction" in lc_msgs[0].content
+    assert lc_msgs[1].content == "User Question"
+
 
 
 

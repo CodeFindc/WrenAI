@@ -56,12 +56,13 @@ def get_exposed_openai_models() -> list[str]:
 
 def convert_openai_messages(messages: list[OpenAIMessage]) -> list[BaseMessage]:
     """Convert a list of OpenAI API format messages into LangChain BaseMessage objects.
-    
-    Ensures all SystemMessage instances (e.g. from file upload context or client prompts)
-    are grouped at the beginning to comply with strict LLM chat templates.
+
+    Merges all SystemMessages into a single SystemMessage at index 0 to comply with strict
+    vLLM / Qwen Jinja2 chat templates ('System message must be at the beginning.').
     """
-    system_messages = []
+    sys_contents = []
     other_messages = []
+
     for msg in messages:
         content = msg.content or ""
         if isinstance(content, list):
@@ -70,7 +71,8 @@ def convert_openai_messages(messages: list[OpenAIMessage]) -> list[BaseMessage]:
 
         role = msg.role.lower()
         if role == "system":
-            system_messages.append(SystemMessage(content=content))
+            if content.strip() and content.strip() not in sys_contents:
+                sys_contents.append(content.strip())
         elif role == "user":
             other_messages.append(HumanMessage(content=content))
         elif role == "assistant":
@@ -78,7 +80,12 @@ def convert_openai_messages(messages: list[OpenAIMessage]) -> list[BaseMessage]:
         elif role == "tool":
             other_messages.append(ToolMessage(content=content, tool_call_id=msg.tool_call_id or "tool_call"))
 
-    return system_messages + other_messages
+    if sys_contents:
+        merged_sys_message = SystemMessage(content="\n\n---\n\n".join(sys_contents))
+        return [merged_sys_message] + other_messages
+
+    return other_messages
+
 
 
 

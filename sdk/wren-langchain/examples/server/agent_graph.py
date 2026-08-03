@@ -38,26 +38,31 @@ def get_current_time() -> str:
 
 
 def ensure_wren_system_prompt(messages: list[BaseMessage], system_prompt: str) -> list[BaseMessage]:
-    """Ensure all SystemMessages (including Wren system prompt & client file context) are grouped at the very beginning of the message list.
+    """Ensure all system instructions (Wren prompt & client prompts) are merged into a SINGLE SystemMessage at index 0.
 
-    This prevents HTTP 400 'System message must be at the beginning' errors from strict LLM providers (e.g., vLLM / Qwen).
+    This prevents vLLM / Qwen Jinja2 chat template exceptions ('System message must be at the beginning.')
+    which occur whenever more than one system message exists in the payload.
     """
-    sys_messages = []
+    sys_contents = []
     other_messages = []
 
-    has_wren_prompt = False
+    if system_prompt and system_prompt.strip():
+        sys_contents.append(system_prompt.strip())
+
     for msg in messages:
         if isinstance(msg, SystemMessage):
-            if system_prompt and msg.content == system_prompt:
-                has_wren_prompt = True
-            sys_messages.append(msg)
+            content = (msg.content or "").strip()
+            if content and content not in sys_contents:
+                sys_contents.append(content)
         else:
             other_messages.append(msg)
 
-    if system_prompt and not has_wren_prompt:
-        sys_messages.insert(0, SystemMessage(content=system_prompt))
+    if not sys_contents:
+        return other_messages
 
-    return sys_messages + other_messages
+    merged_sys_content = "\n\n---\n\n".join(sys_contents)
+    return [SystemMessage(content=merged_sys_content)] + other_messages
+
 
 
 
