@@ -1,10 +1,184 @@
 # Wren LangGraph Stateful API Server & Dual-Track Integration
 
+[English](#wren-langgraph-stateful-api-server--dual-track-integration) | [中文说明](#wren-langgraph-有状态-api-服务与双轨集成)
+
+---
+
+<a id="wren-langgraph-有状态-api-服务与双轨集成"></a>
+# Wren LangGraph 有状态 API 服务与双轨集成 (中文说明)
+
+本目录包含完整的参考可运行实现，展示如何将 Wren AI 语义层项目封装入 **有状态、多轮 LangGraph Agent API 服务**（兼容 OpenAI API 规范）与 **FastMCP 双传输协议服务**（标准 SSE + Streamable HTTP）中，实现与 **DEEIX-Chat**、Dify、Open-WebUI 等 AI 平台的无缝集成。
+
+---
+
+## 1. 架构总览 (双轨集成模式)
+
+```
+                            ┌────────────────────────────────────────┐
+                            │           DEEIX-Chat 平台             │
+                            │  (Web UI / 计费 / 鉴权 / 路由转发)      │
+                            └──────────────────┬─────────────────────┘
+                                               │
+                      ┌────────────────────────┴────────────────────────┐
+                      ▼                                                 ▼
+        【轨道 A: MCP 插件协议】                             【轨道 B: OpenAI API 协议】
+       客户端作为标准 MCP Client                           客户端作为上游 LLM Client
+   (由 LLM 驱动 ReAct 循环调用工具)                     (在模型列表中选择 "wren-agent")
+                      │                                                 │
+                      ▼ (端口 8202 - SSE /sse 与 Streamable HTTP /mcp)  ▼ (端口 8201 - OpenAI /v1 协议)
+        ┌────────────────────────┐                        ┌────────────────────────┐
+        │   wren_mcp_server.py   │                        │langgraph_fastapi_multi │
+        │  (FastMCP 双传输服务)  │                        │ (/v1/chat/completions) │
+        └───────────┬────────────┘                        └───────────┬────────────┘
+                    │                                                 │
+                    └────────────────────────┬────────────────────────┘
+                                             ▼
+                            ┌────────────────────────────────────────┐
+                            │         WrenAI 语义层核心             │
+                            │  (WrenToolkit; Track B 结合 LangGraph) │
+                            └────────────────────────────────────────┘
+```
+
+---
+
+## 2. 基础镜像打包指南 (Building Base Images)
+
+为提升构建速度并预装 C 扩展依赖（如 `mysqlclient` 与 `pkg-config`），本项目支持打包预调教的基础镜像：
+
+### 2.1 打包中国大陆极速 Base 镜像 (`wrenai-base:cn`)
+预封装了**腾讯云 / 清华大学 APT 源**、**npmmirror 镜像源**与**腾讯云 PyPI 镜像源**，支持 2 秒内极速构建：
+
+- **Windows 环境**：
+  ```cmd
+  build_base.bat
+  ```
+- **Linux / macOS 环境**：
+  ```bash
+  chmod +x build_base.sh && ./build_base.sh
+  ```
+- **手动 Docker 命令**：
+  ```bash
+  docker build -t wrenai-base:cn -f Dockerfile.cn.base .
+  ```
+
+### 2.2 打包标准 Base 镜像 (`wrenai-base:latest`)
+```bash
+docker build -t wrenai-base:latest -f Dockerfile.base .
+```
+
+---
+
+## 3. 多种服务启动与部署方式 (Deployment Variants)
+
+### 模式 1：中国大陆 2 秒增量构建极速模式 (推荐生产/极速迭代)
+基于 `wrenai-base:cn` 基础镜像，修改代码后仅需 2 秒即可完成增量重建：
+```bash
+docker-compose -f docker-compose.fast.yaml up -d --build
+```
+
+### 模式 2：Claude CLI 自动化数据源接入模式 (数据源自动 Onboarding)
+基于容器化 Claude CLI 结合 `.claude/skills/offline_wren_generate-mdl` 离线 Skill，**无需人工干预**，全自动探查目标数据库 Schema、规范化数据类型，并生成全量 MDL 物理模型与校验构建：
+
+- **一键脚本启动**：
+  - Windows: `init_datasource_claude.bat`
+  - Linux / macOS: `./init_datasource_claude.sh`
+- **Compose 编排启动**：
+  ```bash
+  docker-compose -f docker-compose.claude.yaml up -d --build
+  ```
+  *(注：已解决 `--dangerously-skip-permissions` 限制、`--verbose` 流式参数、Qwen Jinja2 `400 System message must be at the beginning` 代理自动合并及 `wrenai-claude-init` 独立项目名隔离)*
+
+### 模式 3：精简体积镜像模式 (Slim Mode)
+适合镜像部署空间受限的场景：
+```bash
+docker-compose -f docker-compose.slim.yaml up -d --build
+```
+
+### 模式 4：标准双轨模式 (Standard Dual-Track Mode)
+```bash
+docker-compose up -d --build
+```
+
+### 模式 5：本地直接开发启动 (Local Development)
+- **Windows 批处理调起**：`start_server.bat`
+- **Python 一键脚本调起**：`python start_dual_services.py`
+
+---
+
+## 4. Wren System Prompt 提示词位置与注入机制
+
+### 4.1 提示词定义源
+WrenAI 语义引擎依赖专属的系统提示词指导 LLM 进行表结构探索与 SQL 推演。定义源位于 `wren_langchain` 包的 `WrenToolkit` (`toolkit.system_prompt()`)。
+
+### 4.2 源码位置与注入节点
+
+| 场景 / 轨道 | 源码文件 | 核心函数 / 节点 | 运行机制 |
+|---|---|---|---|
+| **Track B (FastAPI Agent)** | [`examples/server/agent_graph.py`](file:///D:/dev/WrenAI/sdk/wren-langchain/examples/server/agent_graph.py#L40-L60) | `ensure_wren_system_prompt()` | 在 `agent_node` 调用 LLM 前，自动将 `toolkit.system_prompt()` 放置在消息列表 Index 0 位置。无论前端上传文件如何插入消息，均自动合并归集至最头部，完全规避上游 vLLM / Qwen 400 报错。 |
+| **Track A (FastMCP Engine)** | [`examples/wren_mcp_server.py`](file:///D:/dev/WrenAI/sdk/wren-langchain/examples/wren_mcp_server.py#L180-L190) | `@mcp.tool` `wren_get_system_prompt()` | 暴露 MCP 工具供外部客户端（如 DEEIX-Chat、Dify 等）主动拉取 Wren 语义提示词。 |
+
+---
+
+## 5. 全量环境变量参考表 (Environment Variables Reference)
+
+### 5.1 核心服务与网络绑定
+| 变量名 | 说明 | 默认值 / 示例 |
+|---|---|---|
+| `PROJECT_PATH` | Wren AI 语义项目目录路径（包含 `.wren` 与 `models/`）。 | `/project` 或 `./wren_project` |
+| `PORT` | Track B FastAPI / OpenAI 代理服务监听端口。 | `8201` |
+| `MCP_HOST` / `MCP_PORT` | Track A FastMCP 服务监听主机与端口。 | `0.0.0.0` : `8202` |
+| `MCP_SSE_PATH` | 传统 MCP SSE 挂载路径。 | `/sse` |
+| `MCP_STREAMABLE_HTTP_PATH` | Streamable HTTP JSON-RPC 挂载路径（DEEIX `baseURL`）。 | `/mcp` |
+
+### 5.2 上游 LLM 配置
+| 变量名 | 说明 | 默认值 / 示例 |
+|---|---|---|
+| `OPENAI_API_KEY` / `LLM_API_KEY` | 上游 LLM 鉴权 API Key。 | `sk-proj-...` |
+| `OPENAI_API_BASE` / `LLM_API_BASE` | 上游 LLM 服务地址（支持 vLLM, OneAPI, DeepSeek 等）。 | `http://192.168.110.209:8200/v1` |
+| `LLM_MODEL_NAME` | 物理部署的模型名称（虚拟别名如 `wren-agent` 自动映射至此）。 | `Qwen3.6-27B-AEON-Ultimate-Uncensored-BF16` |
+| `LLM_REQUEST_TIMEOUT` | 上游 LLM 请求超时时间（秒）。 | `60` |
+
+### 5.3 容器化 Claude CLI & Anthropic API 路由 (Claude Onboarding)
+| 变量名 | 说明 | 默认值 / 示例 |
+|---|---|---|
+| `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` | Anthropic API / OneAPI 鉴权 Token。 | `sk-dummy` |
+| `ANTHROPIC_BASE_URL` | Anthropic API / 中转服务 Base 地址。 | `http://192.168.110.209:8200/v1` |
+| `ANTHROPIC_MODEL` | Claude CLI 调用的主模型名称。 | `Qwen3.6-27B-AEON-Ultimate-Uncensored-BF16` |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | 覆盖 Claude Sonnet 别名路由。 | `${ANTHROPIC_MODEL}` |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | 覆盖 Claude Haiku 别名路由。 | `${ANTHROPIC_MODEL}` |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` | 覆盖 Claude Opus 别名路由。 | `${ANTHROPIC_MODEL}` |
+| `CLAUDE_CODE_SUBAGENT_MODEL` | 覆盖 Claude SubAgent 子代理模型路由。 | `${ANTHROPIC_MODEL}` |
+| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | 开启 Agent 多智能体团队协同。 | `1` |
+
+### 5.4 Track B 思考流与客户端降级防护
+| 变量名 | 说明 | 默认值 / 示例 |
+|---|---|---|
+| `OPENAI_EXPOSED_MODELS` | `GET /v1/models` 暴露的模型列表。 | `wren-agent,wrenai,wren-semantic-analyst` |
+| `OPENAI_PROCESS_STREAM_MODE` | 思考推演流输出模式：`reasoning`（输出思考流）、`text`、`both`、`off`。 | `reasoning` |
+| `OPENAI_SSE_KEEPALIVE_SECONDS` | SSE 心跳保护间隔（秒），防止长耗时推演被连接切断。 | `15` |
+| `OPENAI_SSE_KEEPALIVE_STYLE` | 心跳数据包格式：`comment` (`: keepalive\n\n`) 或 `empty_delta`。 | `comment` |
+| `CHAT_HISTORY_DB_URI` | 持续化多轮会话 MySQL URI（为空使用 `MemorySaver`）。 | `mysql+pymysql://root:pass@host:3306/db` |
+
+---
+
+## 6. DEEIX-Chat 接入与会话保持排错指南
+
+1. **HTTP 200 OK 优雅降级与会话保持**：
+   当上游 LLM 报错或数据库连接超时时，Track B 接口不会抛出 HTTP 500 硬崩溃，而是返回 200 OK 结构并在 `content` 中返回提示。DEEIX-Chat 能正常将其追加为回复，**绝对保证本地 Session 历史不丢失、对话链条不中断**。
+2. **支持 `user` 字段与会话绑定**：
+   请求体中的 `user` 字段（或 `x-session-id` Header）会自动作为 LangGraph 的 `thread_id` 关联 Checkpointer，实现多轮对话持久化。
+
+---
+---
+
+<a id="wren-langgraph-stateful-api-server--dual-track-integration"></a>
+# Wren LangGraph Stateful API Server & Dual-Track Integration (English)
+
 This directory contains a runnable reference implementation demonstrating how to wrap a Wren AI semantic layer project inside a **stateful, multi-turn LangGraph Agent API Server** (with OpenAI compatibility) and a **FastMCP dual-transport Server** (classic SSE + Streamable HTTP) for seamless integration with AI platforms like **DEEIX-Chat**.
 
 ---
 
-## Architecture Overview (Dual-Track Mode)
+## 1. Architecture Overview (Dual-Track Mode)
 
 ```
                             ┌────────────────────────────────────────┐
@@ -16,7 +190,7 @@ This directory contains a runnable reference implementation demonstrating how to
                       ▼                                                 ▼
         【Track A: MCP Plugin Protocol】                    【Track B: OpenAI API Adapter Protocol】
        DEEIX-Chat / Client as MCP Client                  DEEIX-Chat / Client as Upstream Client
-  (LLM ReAct over wren_query / dry_plan / …)             (Select "wren-agent" from model list)
+   (LLM ReAct over wren_query / dry_plan / …)             (Select "wren-agent" from model list)
                       │                                                 │
                       ▼ (Port 8202 - SSE /sse + Streamable HTTP /mcp)   ▼ (Port 8201 - OpenAI /v1 Protocol)
         ┌────────────────────────┐                        ┌────────────────────────┐
@@ -34,333 +208,104 @@ This directory contains a runnable reference implementation demonstrating how to
 
 ---
 
-## Features
+## 2. Base Image Packaging Guide
 
-1. **Track A: FastMCP dual-transport Server (Port 8202)**:
-   - Exposes real WrenToolkit tools (`wren_query`, `wren_dry_plan`, `wren_list_models`, optional memory tools, plus `wren_get_system_prompt`) over Model Context Protocol (MCP) on **both** classic SSE (`/sse`) and Streamable HTTP (`/mcp`, what DEEIX-Chat speaks).
-   - Platform LLMs (GPT-4o, Claude, DeepSeek, etc.) run their own ReAct loop: list/fetch context → write SQL → dry_plan → query. Track A is **not** an NL2SQL black box (use Track B for that).
+To speed up image builds and pre-package C extension dependencies (`mysqlclient`, `pkg-config`), you can build the pre-packaged base image:
 
-2. **Track B: OpenAI API Compatible Adapter (Port 8201)**:
-   - Provides `/v1/models` and `/v1/chat/completions` endpoints supporting both non-streaming JSON responses and SSE streaming (`stream=true`).
-   - Automatically translates LangGraph node execution steps into standard OpenAI SSE delta chunks (`chat.completion.chunk`).
+### 2.1 Build CN Accelerated Base Image (`wrenai-base:cn`)
+Pre-configured with **Tencent Cloud APT mirrors**, **npmmirror**, and **Tsinghua/Tencent PyPI mirrors**:
 
-3. **Stateful Session Chat**:
-   - Preserves multi-turn conversation history using LangGraph checkpointers (`MemorySaver` or MySQL database checkpointer via `CHAT_HISTORY_DB_URI`).
+- **Windows**:
+  ```cmd
+  build_base.bat
+  ```
+- **Linux / macOS**:
+  ```bash
+  chmod +x build_base.sh && ./build_base.sh
+  ```
+- **Manual Docker Command**:
+  ```bash
+  docker build -t wrenai-base:cn -f Dockerfile.cn.base .
+  ```
 
-4. **MCP Client Extension**:
-   - Dynamically loads external Model Context Protocol (MCP) servers (stdio / streamable_http / SSE) configured via `MCP_CONFIG_DIR`.
-
-5. **Container & Dual Service Management**:
-   - Out-of-the-box `docker-compose.yaml`, `Dockerfile`, and `start_dual_services.py` for launching both Track A and Track B concurrently.
-
----
-
-## Minimal SDK Demos
-
-Besides the dual-track servers above, this directory ships two minimal scripts that show the `wren-langchain` SDK in isolation — no FastAPI, no MCP, no Docker:
-
-| Script | What it does |
-|---|---|
-| `langchain_demo.py` | Calls `langchain.agents.create_agent(model, tools, system_prompt)` — the high-level factory that hides the agent loop. |
-| `langgraph_demo.py` | Hand-builds the same ReAct loop with LangGraph primitives (`StateGraph`, `ToolNode`, conditional edges) so you can customize routing / state / streaming. |
-
-Run either with:
-
+### 2.2 Build Standard Base Image (`wrenai-base:latest`)
 ```bash
-export OPENAI_API_KEY=sk-...
-export PROJECT_PATH=/path/to/your-wren-project
-python examples/langchain_demo.py      # or langgraph_demo.py
+docker build -t wrenai-base:latest -f Dockerfile.base .
 ```
-
-A committed DuckDB-backed sample project lives at `examples/wren_project` — run `wren context build` inside it first (see its `README` for the bundled data setup). This is the fastest way to try the demos without provisioning a real database.
 
 ---
 
-## Automated Tests
+## 3. Deployment & Startup Variants
 
-Run the automated test suite covering Track A (MCP server), Track B (FastAPI server & OpenAI adapter), checkpointers, and formatters:
-
+### Variant 1: Fast Build Mode (CN Accelerated - 2-Second Incremental Rebuild)
+Inherits `wrenai-base:cn` base image for ultra-fast incremental rebuilds:
 ```bash
-pytest examples/tests -v
+docker-compose -f docker-compose.fast.yaml up -d --build
 ```
 
----
+### Variant 2: Claude CLI Automated Datasource Onboarding Mode
+Runs containerized Claude CLI with pre-loaded `.claude/skills/offline_wren_generate-mdl` to discover schema and generate MDL models **100% unattended**:
 
-## Wren System Prompt & Tool Instructions (系统提示词位置与注入机制)
+- **Helper Scripts**:
+  - Windows: `init_datasource_claude.bat`
+  - Linux / macOS: `./init_datasource_claude.sh`
+- **Docker Compose**:
+  ```bash
+  docker-compose -f docker-compose.claude.yaml up -d --build
+  ```
 
-WrenAI 语义引擎在与大模型 (LLM) 交互时，依赖专属的 **Wren System Prompt**（系统提示词）来指导 LLM 如何使用 6 大核心语义工具进行表结构探索、向量召回、SQL 推演及校验发包。
-
-### 1. 提示词定义源 (Definition Source)
-- **底层 SDK 定义**：系统提示词在 `wren_langchain` 包的 `WrenToolkit` 中通过 `toolkit.system_prompt()` 统一生成与维护。提示词内包含了使用 `wren_list_models`、`wren_fetch_context`、`wren_dry_plan` 和 `wren_query` 的核心规范与约束。
-
-### 2. 源码位置与注入节点 (Code Locations & Injection Points)
-
-| 场景 / 轨道 | 源码文件 | 核心函数 / 节点 | 运行机制 |
-|---|---|---|---|
-| **Track B (FastAPI Agent)** | [`examples/server/agent_graph.py`](file:///D:/dev/WrenAI/sdk/wren-langchain/examples/server/agent_graph.py#L40-L60) | `ensure_wren_system_prompt()` | 在 ReAct 节点 `agent_node` 调用 `ChatOpenAI.invoke()` 前，自动将 `toolkit.system_prompt()` 放置在消息列表最头部（Index 0）。即便前端或 DEEIX-Chat 上传文件将 `SystemMessage` 放在列表中后部，也会自动归集至最前面，完全规避上游 400 报错。 |
-| **Track A (FastMCP Engine)** | [`examples/wren_mcp_server.py`](file:///D:/dev/WrenAI/sdk/wren-langchain/examples/wren_mcp_server.py#L180-L190) | `@mcp.tool` `wren_get_system_prompt()` | 暴露 MCP 工具供外部客户端（如 DEEIX-Chat、Dify、Open-WebUI 等）主动拉取 Wren 语义提示词，以便客户端在前端/本地编排 LLM 的 System Prompt。 |
-
-### 3. 如何自定义与拓展系统提示词 (Customization Guide)
-若需要在默认 Wren 语义提示词的基础上增加业务规则（例如指定输出语言、数据脱敏要求或行业术语映射），可在 [`examples/server/agent_graph.py`](file:///D:/dev/WrenAI/sdk/wren-langchain/examples/server/agent_graph.py) 的 `build_app` 或 `agent_node` 中进行叠加：
-
-```python
-# 在 agent_graph.py 中自定义叠加提示词
-base_prompt = toolkit.system_prompt()
-custom_prompt = base_prompt + "\n\n【业务规则】: 所有分析结论必须使用中文回复，并附带 SQL 计算逻辑说明。"
-
-# ensure_wren_system_prompt 会自动将其作为顶层 SystemMessage 注入
-messages = ensure_wren_system_prompt(messages, custom_prompt)
-```
-
----
-
-
-## Environment Variables Reference
-
-The Dual-Track services (FastMCP dual-transport MCP and OpenAI-compatible API) can be fully customized via environment variables:
-
-### 1. Core Services & Network Binding
-| Variable | Description | Default / Example |
-|---|---|---|
-| `PROJECT_PATH` | Path to the prepared Wren AI semantic project directory (containing `.wren`). | `/project` or `./wren_project` |
-| `PORT` | Listening port for Track B FastAPI / OpenAI Proxy server (`/v1/*` & `/chat*`). | `8201` |
-| `MCP_HOST` | Host binding for Track A FastMCP dual-transport server. | `0.0.0.0` |
-| `MCP_PORT` | Listening port for Track A FastMCP dual-transport server. | `8202` |
-| `MCP_SSE_PATH` | Classic MCP SSE endpoint path. | `/sse` |
-| `MCP_STREAMABLE_HTTP_PATH` | Streamable HTTP JSON-RPC endpoint path (DEEIX `baseURL`). | `/mcp` |
-
-### 2. Upstream LLM Configuration
-| Variable | Description | Default / Example |
-|---|---|---|
-| `OPENAI_API_KEY` | API Key for upstream LLM used by LangGraph agent logic. | `sk-proj-...` |
-| `LLM_API_BASE` / `OPENAI_API_BASE` | Base URL for LLM service (supports vLLM, Ollama, OneAPI, DeepSeek, etc.). | `http://192.168.110.209:8200/v1` |
-| `LLM_MODEL_NAME` | Physical model name deployed on the upstream LLM provider. Virtual request aliases (`wrenai`, `wren-agent`, `wren-semantic-analyst`) are automatically mapped to this target model. | `Qwen2.5-72B-Instruct` or `gpt-4o` |
-| `LLM_REQUEST_TIMEOUT` | Upstream LLM HTTP request timeout in seconds. Long tool-heavy turns with large contexts can exceed the old hard-coded 60s and get false-killed. | `60` |
-
-### 3. Track B OpenAI Adapter & Thinking Stream
-| Variable | Description | Default / Example |
-|---|---|---|
-| `OPENAI_EXPOSED_MODELS` | Virtual model IDs returned by `GET /v1/models` (comma-separated). Automatically includes `LLM_MODEL_NAME` when configured. | `wren-agent,wrenai,wren-semantic-analyst` |
-| `OPENAI_PROCESS_STREAM_MODE` | ReAct reasoning & tool execution trace mode: `reasoning` (default, emits `delta.reasoning_content` for UI thinking trace), `text` (inline), `both`, or `off`. | `reasoning` |
-| `OPENAI_PROCESS_MAX_TOOL_CHARS` | Character truncation limit for tool execution summary in thinking trace. | `400` |
-
-
-### 4. SSE Stream Keepalive (Prevent Client Idle Timeout)
-| Variable | Description | Default / Example |
-|---|---|---|
-| `OPENAI_SSE_KEEPALIVE_SECONDS` | Heartbeat interval in seconds during long tool/LLM inference windows (`<=0` to disable). | `15` |
-| `OPENAI_SSE_KEEPALIVE_STYLE` | Heartbeat byte format: `comment` (`: keepalive\n\n`, zero UI noise) or `empty_delta` (`delta: {}`). | `comment` |
-
-### 5. Diagnostics & Persistence
-| Variable | Description | Default / Example |
-|---|---|---|
-| `LOG_LEVEL` | Application logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`). | `INFO` |
-| `CHAT_HISTORY_DB_URI` | Connection URI for persistent MySQL checkpointer (`mysql+pymysql://...`). Defaults to `MemorySaver`. | `mysql+pymysql://root:pass@host:3306/db` |
-| `MCP_CONFIG_DIR` | Directory containing JSON definition files for external MCP servers. | `./mcp_configs` |
-
-### 6. Automatic Data Source Profile Setup (`entrypoint.sh`)
-| Variable | Description | Default / Example |
-|---|---|---|
-| `ACTIVE_PROFILE` | Name of the active profile generated in `.wren/profiles.yml`. | `default` |
-| `DATASOURCE` | Data source type (`mysql`, `postgres`, `duckdb`, `bigquery`, etc.). | `mysql` |
-| `DB_HOST` / `DB_PORT` | Target database hostname and port. | `127.0.0.1:3306` |
-| `DB_NAME` / `DB_USER` / `DB_PASSWORD` | Database credentials and target database name. | `root` / `secret` |
-| `SSL_MODE` | Database SSL connection mode (`DISABLED`, `REQUIRED`, etc.). | `DISABLED` |
-| `EXTRA_PROFILE_KEYS` | JSON object of extra profile keys; nested dicts OK (e.g. `{"kwargs":{"read_timeout":120}}`). | _empty_ |
-| `DB_CONNECT_TIMEOUT` / `DB_READ_TIMEOUT` / `DB_WRITE_TIMEOUT` | MySQL/Doris driver-level timeouts (seconds). Only injected for `mysql`/`doris`; the library injects no default timeout for MySQL otherwise. | `5` / `60` / `30` |
-| `DB_MAX_CONNECTIONS` | MySQL/Doris connector connection-pool size. | `30` |
-| `DB_PROFILE_TIMEOUTS` | Set to `0` to skip injecting the MySQL/Doris `kwargs` block (e.g. for non-MySQL sources). | `1` |
-
----
-
-## Structured Logging & Request Traceability
-
-All application logs follow a structured format tagged with `[req=<request_id>]` for end-to-end request tracing:
-
-```text
-2026-07-24 15:40:01 INFO [wren.sse] [req=chatcmpl-a0e2] stream_start route=/v1/chat/completions model=wren-agent process_mode=reasoning keepalive=15.0s style=comment
-2026-07-24 15:40:02 INFO [wren.tool] [req=chatcmpl-a0e2] tool_start name=wren_query args={"sql":"SELECT ...","limit":100}
-2026-07-24 15:40:03 INFO [wren.tool] [req=chatcmpl-a0e2] tool_end name=wren_query result_chars=1200
-2026-07-24 15:40:04 INFO [wren.llm] [req=chatcmpl-a0e2] invoke_start model=gpt-4o base=default messages=6
-2026-07-24 15:40:18 INFO [wren.llm] [req=chatcmpl-a0e2] invoke_end duration_ms=14012 has_tool_calls=false content_chars=256
-2026-07-24 15:40:18 INFO [wren.sse] [req=chatcmpl-a0e2] stream_end outcome=ok duration_ms=17050 keepalive_count=1 yielded_content=true
-```
-
-### Useful Log Inspection Commands
-
+### Variant 3: Slim Image Mode
+Optimized container size for memory-constrained host environments:
 ```bash
-# 1. Trace a specific request end-to-end
-docker logs wren-langgraph-api 2>&1 | grep 'req=chatcmpl-a0e2'
-
-# 2. Monitor stream lifecycle and outcomes (ok/error)
-docker logs wren-langgraph-api 2>&1 | grep 'stream_end'
-
-# 3. Inspect errors and exceptions with stack traces
-docker logs wren-langgraph-api 2>&1 | grep ' ERROR '
+docker-compose -f docker-compose.slim.yaml up -d --build
 ```
 
----
-
-## Running the Dual-Track Services
-
-### Option 1: Docker Compose (Recommended for Production)
-
-Standard build & launch:
+### Variant 4: Standard Dual-Track Mode
 ```bash
 docker-compose up -d --build
 ```
 
-**China Mainland Network Accelerated Build (中国大陆网络极速构建)**:
-```bash
-docker-compose -f docker-compose.cn.yaml build --no-cache
-docker-compose -f docker-compose.cn.yaml up -d
-```
-*(Uses Tsinghua APT mirror, npmmirror registry, PyPI Tsinghua mirror, and GitHub proxy for ultra-fast build in Mainland China)*
-
-- **Track B (OpenAI Proxy & API)**: `http://localhost:8201/v1`
-- **Track A MCP SSE**: `http://localhost:8202/sse`
-- **Track A MCP Streamable HTTP (DEEIX)**: `http://localhost:8202/mcp`
-
-### Option 2: Windows Batch Script (Local Development)
-
-```cmd
-start_server.bat
-```
-
-### Option 3: Python Launcher
-
-```bash
-python start_dual_services.py
-```
-
-### Chat UI at `/`
-
-Track B serves a built-in chat UI at `http://<host>:8201/`. It is **not**
-shipped pre-built — `dist/` is gitignored. Build it once:
-
-```bash
-cd wren-chat-ui && npm install && npm run build
-```
-
-Then `GET /` returns the compiled SPA (it talks to the native
-`/chat/stream` NDJSON endpoint). If `dist/` is absent, `/` falls back to a
-status dashboard listing the Track A / Track B endpoints. See
-`wren-chat-ui/README.md` for the dev-server flow and backend contract.
+### Variant 5: Local Development
+- **Windows Launcher**: `start_server.bat`
+- **Python Launcher**: `python start_dual_services.py`
 
 ---
 
-## API Endpoints & Usage
+## 4. Wren System Prompt & Injection Points
 
-### Track A: FastMCP dual transport (port 8202)
+### 4.1 Definition Source
+Wren System Prompts are generated by `WrenToolkit` in `wren_langchain` (`toolkit.system_prompt()`).
 
-| Transport | URL | Clients |
-|---|---|---|
-| Classic SSE | `http://localhost:8202/sse` (+ POST `/messages/`) | Claude Desktop / older MCP clients |
-| **Streamable HTTP** | `http://localhost:8202/mcp` | **DEEIX-Chat** (JSON-RPC POST; Accept: `application/json, text/event-stream`) |
-| Health | `http://localhost:8202/health` | Ops / readiness |
+### 4.2 Code Locations
 
-Test connectivity:
-```bash
-# Health (both transports advertised)
-curl http://localhost:8202/health
-
-# Classic SSE (long-lived; Ctrl-C to stop)
-curl -N http://localhost:8202/sse
-
-# Streamable HTTP — MCP initialize (what DEEIX does first)
-curl -s -X POST http://localhost:8202/mcp \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
-```
-
-**DEEIX-Chat MCP registration** (Admin → MCP servers):
-```json
-{
-  "name": "wren-semantic",
-  "baseURL": "http://<wren-host>:8202/mcp",
-  "authToken": "",
-  "headersJSON": "{}",
-  "status": "active"
-}
-```
-Then sync tools and enable `wren_query` / `wren_list_models` / … on the chat. Do **not** also select `wren-agent` (Track B) in the same turn — that would double-agent.
-
-Available Tools in FastMCP (mirrors `WrenToolkit.get_tools()` + meta helper):
-
-| Tool | Args | Purpose |
-|---|---|---|
-| `wren_query` | `sql: str`, `limit: int = 100` | Execute SQL via the Wren semantic layer (hard cap 1000 rows) |
-| `wren_dry_plan` | `sql: str` | Expand MDL → target-dialect SQL (no DB round-trip) |
-| `wren_list_models` | _(none)_ | List project models / column counts / descriptions |
-| `wren_fetch_context` | `question`, `limit=5`, optional `item_type`/`model` | Embedding schema/context search (requires `.wren/memory/`) |
-| `wren_recall_queries` | `question`, `limit=3` | Recall past NL→SQL pairs (requires memory) |
-| `wren_store_query` | `nl`, `sql`, optional `tags` | Persist a confirmed NL→SQL pair (requires memory) |
-| `wren_get_system_prompt` | _(none)_ | Wren workflow system prompt for the calling agent |
-
-Memory tools are always advertised; if `.wren/memory/` is missing they return a clear error. Tool results are JSON envelopes (`{ok, content, data, ...}` or `{ok:false, error}`).
-
-> **Breaking change:** the old `wren_semantic_query(question)` / `wren_list_tools` entrypoints were removed — they incorrectly treated natural language as SQL. Re-sync MCP tools on any client (e.g. DEEIX) after upgrading.
+| Track | Source File | Function / Node | Description |
+|---|---|---|---|
+| **Track B (FastAPI Agent)** | [`examples/server/agent_graph.py`](file:///D:/dev/WrenAI/sdk/wren-langchain/examples/server/agent_graph.py#L40-L60) | `ensure_wren_system_prompt()` | Merges system instructions into a single `SystemMessage` at index 0 prior to calling LLM, preventing vLLM / Qwen 400 errors. |
+| **Track A (FastMCP Engine)** | [`examples/wren_mcp_server.py`](file:///D:/dev/WrenAI/sdk/wren-langchain/examples/wren_mcp_server.py#L180-L190) | `@mcp.tool` `wren_get_system_prompt()` | Exposes tool for MCP clients (DEEIX-Chat, Dify) to fetch Wren system prompt. |
 
 ---
 
-### Track B: OpenAI API Adapter (`http://localhost:8201/v1`)
+## 5. Environment Variables Reference
 
-#### 1. Models Discovery (`GET /v1/models`)
-```bash
-curl http://localhost:8201/v1/models
-```
+See `.env.example` for a complete template.
 
-#### 2. Chat Completions - Non-Streaming (`POST /v1/chat/completions`)
-```bash
-curl -X POST http://localhost:8201/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "wren-agent",
-    "messages": [
-      {"role": "user", "content": "How many records are in our database?"}
-    ],
-    "stream": false
-  }'
-```
+### 5.1 Core & Network Binding
+- `PROJECT_PATH`: Path to Wren semantic project (`/project` or `./wren_project`).
+- `PORT`: Track B FastAPI / OpenAI Proxy port (`8201`).
+- `MCP_HOST` / `MCP_PORT`: Track A FastMCP host and port (`0.0.0.0` : `8202`).
 
-#### 3. Chat Completions - Streaming SSE (`POST /v1/chat/completions`)
-```bash
-curl -X POST http://localhost:8201/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "wren-agent",
-    "messages": [
-      {"role": "user", "content": "Summarize total customer orders for last month"}
-    ],
-    "stream": true
-  }'
-```
+### 5.2 Upstream LLM & Anthropic Routing
+- `OPENAI_API_KEY` / `LLM_API_KEY`: Upstream LLM API key.
+- `LLM_API_BASE` / `OPENAI_API_BASE`: Upstream LLM base URL.
+- `LLM_MODEL_NAME`: Target model deployed upstream (`Qwen3.6-27B-AEON-Ultimate-Uncensored-BF16`).
+- `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL`: Auth token & URL for Claude CLI.
+- `ANTHROPIC_DEFAULT_SONNET_MODEL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL` / `CLAUDE_CODE_SUBAGENT_MODEL`: Model alias overrides for local LLM routing.
 
 ---
 
-### Legacy Endpoints
+## 6. Automated Tests
 
-- **Swagger UI**: `http://localhost:8201/docs`
-- **Native Chat API**: `POST /chat`
-- **Native Stream API**: `POST /chat/stream`
-
----
-
-## Troubleshooting Reverse Proxies & Streaming Interruption
-
-If UI clients (such as DEEIX-Chat) report streaming interruptions during long-running tool queries:
-
-1. **Proxy Buffering**: Ensure reverse proxies (Nginx / Ingress / Traefik) do not buffer SSE streams (`X-Accel-Buffering: no` is set by default in responses).
-2. **Comment Stripping**: If proxies strip SSE comment lines (`: keepalive\n\n`), switch to empty delta chunks by setting:
-   ```bash
-   OPENAI_SSE_KEEPALIVE_STYLE=empty_delta
-   ```
-3. **Verify Keepalive with cURL**:
-   ```bash
-   curl -N -X POST http://localhost:8201/v1/chat/completions \
-     -H "Content-Type: application/json" \
-     -d '{"model":"wren-agent","messages":[{"role":"user","content":"Run complex query"}],"stream":true}'
-   ```
-   Look for periodic `: keepalive` ping comments every 15 seconds during long inference windows.
-- **History Retrieval**: `GET /chat/history/{session_id}`
+Run full test suite:
+```bash
+pytest examples/tests -v
+```
