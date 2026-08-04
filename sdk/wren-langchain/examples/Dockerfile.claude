@@ -21,8 +21,9 @@ RUN pip install --no-cache-dir \
 # Create non-root user for Claude CLI execution (satisfies --dangerously-skip-permissions requirement)
 RUN useradd -m -u 1000 -s /bin/bash wrenuser 2>/dev/null || true
 
-# Copy entrypoint.claude.sh from repo build context into target directory
+# Copy entrypoint.claude.sh and server scripts from repo build context into target directory
 COPY sdk/wren-langchain/examples/entrypoint.claude.sh /app/sdk/wren-langchain/examples/entrypoint.claude.sh
+COPY sdk/wren-langchain/examples/server/claude_system_consolidator_proxy.py /app/sdk/wren-langchain/examples/server/claude_system_consolidator_proxy.py
 
 WORKDIR /app/sdk/wren-langchain/examples
 RUN chmod +x entrypoint.claude.sh

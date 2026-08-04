@@ -124,10 +124,15 @@ if command -v claude >/dev/null 2>&1; then
     # Launch background System Message Consolidator Proxy to merge system instructions for vLLM / Qwen compatibility
     proxy_port="8080"
     proxy_url="http://127.0.0.1:${proxy_port}"
+    proxy_script="/app/sdk/wren-langchain/examples/server/claude_system_consolidator_proxy.py"
+    if [ ! -f "$proxy_script" ]; then
+        proxy_script="./server/claude_system_consolidator_proxy.py"
+    fi
     info "Starting System Message Consolidator Proxy -> ${anthropic_url} on port ${proxy_port}..."
-    REAL_ANTHROPIC_BASE_URL="${anthropic_url}" CONSOLIDATOR_PROXY_PORT="${proxy_port}" python3 /app/sdk/wren-langchain/examples/server/claude_system_consolidator_proxy.py >/dev/null 2>&1 &
+    REAL_ANTHROPIC_BASE_URL="${anthropic_url}" CONSOLIDATOR_PROXY_PORT="${proxy_port}" python3 "$proxy_script" >/dev/null 2>&1 &
     PROXY_PID=$!
     sleep 1
+
 
     env_exports="export IS_SANDBOX=1; export IS_SANDBOXED=1; export ANTHROPIC_AUTH_TOKEN=\"${anthropic_auth}\"; export ANTHROPIC_API_KEY=\"${anthropic_auth}\"; export ANTHROPIC_BASE_URL=\"${proxy_url}\"; export ANTHROPIC_MODEL=\"${anthropic_model}\"; export ANTHROPIC_DEFAULT_SONNET_MODEL=\"${sonnet_model}\"; export ANTHROPIC_DEFAULT_HAIKU_MODEL=\"${haiku_model}\"; export ANTHROPIC_DEFAULT_OPUS_MODEL=\"${opus_model}\"; export CLAUDE_CODE_SUBAGENT_MODEL=\"${subagent_model}\"; export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=\"${agent_teams}\";"
 
