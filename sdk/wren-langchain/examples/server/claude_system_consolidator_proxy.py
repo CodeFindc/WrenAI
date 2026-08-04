@@ -1,8 +1,8 @@
 """
-claude_system_consolidator_proxy.py — Lightweight proxy for Claude CLI.
+claude_system_consolidator_proxy.py — Streaming-capable Proxy for Claude CLI.
 
-Consolidates multiple Anthropic / OpenAI system messages into a single system message at index 0
-to prevent vLLM / Qwen Jinja2 template errors ("System message must be at the beginning.").
+Consolidates multiple system messages into a single system prompt (index 0)
+and streams SSE responses in real-time to avoid api_retry timeouts.
 """
 
 import os
@@ -17,7 +17,7 @@ LISTEN_PORT = int(os.environ.get("CONSOLIDATOR_PROXY_PORT", "8080"))
 
 
 def consolidate_payload(data: dict) -> dict:
-    """Consolidate all system instructions into a single system field or message[0]."""
+    """Consolidate all system instructions into a single system prompt."""
     if not isinstance(data, dict):
         return data
 
@@ -32,8 +32,9 @@ def consolidate_payload(data: dict) -> dict:
             for part in sys_val:
                 if isinstance(part, str) and part.strip():
                     system_parts.append(part.strip())
-                elif isinstance(part, dict) and part.get("type") == "text" and part.get("text"):
-                    system_parts.append(part["text"].strip())
+                elif isinstance(part, dict):
+                    if part.get("type") == "text" and part.get("text"):
+                        system_parts.append(part["text"].strip())
 
     # 2. Extract any `role == "system"` from `messages` array
     new_messages = []
@@ -80,34 +81,48 @@ class ConsolidatorProxyHandler(BaseHTTPRequestHandler):
         req = urllib.request.Request(target_url, data=body if body else None, method=method)
 
         for header, value in self.headers.items():
-            if header.lower() not in ("host", "content-length"):
+            if header.lower() not in ("host", "content-length", "accept-encoding"):
                 req.add_header(header, value)
         if body:
             req.add_header("Content-Length", str(len(body)))
 
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=300) as resp:
                 self.send_response(resp.status)
                 for h, v in resp.headers.items():
                     if h.lower() not in ("transfer-encoding", "content-length"):
                         self.send_header(h, v)
-                resp_body = resp.read()
-                self.send_header("Content-Length", str(len(resp_body)))
                 self.end_headers()
-                self.wfile.write(resp_body)
+
+                # Stream response in chunks and flush immediately for SSE
+                while True:
+                    chunk = resp.read(4096)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
         except urllib.error.HTTPError as e:
-            self.send_response(e.code)
-            for h, v in e.headers.items():
-                if h.lower() not in ("transfer-encoding", "content-length"):
-                    self.send_header(h, v)
-            err_body = e.read()
-            self.send_header("Content-Length", str(len(err_body)))
-            self.end_headers()
-            self.wfile.write(err_body)
+            try:
+                self.send_response(e.code)
+                for h, v in e.headers.items():
+                    if h.lower() not in ("transfer-encoding", "content-length"):
+                        self.send_header(h, v)
+                err_body = e.read()
+                self.send_header("Content-Length", str(len(err_body)))
+                self.end_headers()
+                self.wfile.write(err_body)
+                self.wfile.flush()
+            except Exception:
+                pass
         except Exception as e:
-            self.send_response(500)
-            self.end_headers()
-            self.wfile.write(f"Proxy Error: {e}".encode("utf-8"))
+            sys.stderr.write(f"[ConsolidatorProxy] Forward Error: {e}\n")
+            sys.stderr.flush()
+            try:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(f"Proxy Error: {e}".encode("utf-8"))
+            except Exception:
+                pass
 
     def do_POST(self):
         self._forward_request("POST")
@@ -122,6 +137,7 @@ class ConsolidatorProxyHandler(BaseHTTPRequestHandler):
 def main():
     server = HTTPServer(("0.0.0.0", LISTEN_PORT), ConsolidatorProxyHandler)
     print(f"[ConsolidatorProxy] Listening on 0.0.0.0:{LISTEN_PORT} -> {UPSTREAM_BASE_URL}")
+    sys.stdout.flush()
     server.serve_forever()
 
 
