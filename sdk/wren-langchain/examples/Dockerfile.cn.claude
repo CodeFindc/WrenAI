@@ -26,8 +26,8 @@ RUN npm config set registry https://registry.npmmirror.com && \
 RUN pip install --no-cache-dir --prefer-binary -i https://mirrors.cloud.tencent.com/pypi/simple \
     sqlalchemy psycopg2-binary pymysql mysqlclient duckdb clickhouse-connect
 
-# Copy project source code and entrypoint script into container
-COPY . /app/sdk/wren-langchain/examples
+# Copy entrypoint.claude.sh from repo build context into target directory
+COPY sdk/wren-langchain/examples/entrypoint.claude.sh /app/sdk/wren-langchain/examples/entrypoint.claude.sh
 
 WORKDIR /app/sdk/wren-langchain/examples
 RUN chmod +x entrypoint.claude.sh

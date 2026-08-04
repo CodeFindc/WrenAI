@@ -18,8 +18,8 @@ RUN npm install -g @anthropic-ai/claude-code
 RUN pip install --no-cache-dir \
     sqlalchemy psycopg2-binary pymysql mysqlclient duckdb clickhouse-connect
 
-# Copy project source code and entrypoint script into container
-COPY . /app/sdk/wren-langchain/examples
+# Copy entrypoint.claude.sh from repo build context into target directory
+COPY sdk/wren-langchain/examples/entrypoint.claude.sh /app/sdk/wren-langchain/examples/entrypoint.claude.sh
 
 WORKDIR /app/sdk/wren-langchain/examples
 RUN chmod +x entrypoint.claude.sh
