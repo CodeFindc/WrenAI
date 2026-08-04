@@ -676,14 +676,15 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
                     if keepalive_count == 1 or keepalive_count % 4 == 0:
                         logger_sse.info(f"keepalive_ping count={keepalive_count} style={keepalive_style}")
                     yield make_sse_keepalive_chunk(completion_id, request.model, created_ts, keepalive_style)
-                    continue
-
+                if item_type == "end":
+                    break
                 elif item_type == "error":
                     stream_outcome = "error"
                     logger_sse.error(f"stream_error Exception during stream: {item_data}")
                     yield make_chat_chunk(completion_id, request.model, created_ts, {"content": f"\n\n[系统提示]: 处理问答时遇到执行异常 ({item_data})。会话历史已为您完好保留，请继续发送消息。"})
                     yielded_any_content = True
                     break
+
 
                 elif item_type == "progress":
                     trace_str = format_process_progress(item_data)
