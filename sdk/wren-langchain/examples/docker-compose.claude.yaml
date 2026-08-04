@@ -10,10 +10,18 @@ services:
     stdin_open: true
     tty: true
     environment:
-      # ANTHROPIC API / OneAPI / vLLM API Base & Key forwarding
-      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-http://192.168.110.209:8200/v1}
+      # ANTHROPIC API / OneAPI / vLLM API Base & Auth Token forwarding
+      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN:-sk-dummy}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-sk-dummy}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-http://192.168.110.209:8200/v1}
       - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-Qwen3.6-27B-AEON-Ultimate-Uncensored-BF16}
+
+      # Claude Code model alias overrides for local LLM routing
+      - ANTHROPIC_DEFAULT_SONNET_MODEL=${ANTHROPIC_DEFAULT_SONNET_MODEL:-Qwen3.6-27B-AEON-Ultimate-Uncensored-BF16}
+      - ANTHROPIC_DEFAULT_HAIKU_MODEL=${ANTHROPIC_DEFAULT_HAIKU_MODEL:-Qwen3.6-27B-AEON-Ultimate-Uncensored-BF16}
+      - ANTHROPIC_DEFAULT_OPUS_MODEL=${ANTHROPIC_DEFAULT_OPUS_MODEL:-Qwen3.6-27B-AEON-Ultimate-Uncensored-BF16}
+      - CLAUDE_CODE_SUBAGENT_MODEL=${CLAUDE_CODE_SUBAGENT_MODEL:-Qwen3.6-27B-AEON-Ultimate-Uncensored-BF16}
+      - CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-1}
 
       # OpenAI API config Embedded Model (or general OpenAI-compatible endpoints)
       - WREN_EMBEDDING_PROVIDER=openai
