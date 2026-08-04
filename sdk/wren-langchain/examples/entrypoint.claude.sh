@@ -7,7 +7,7 @@
 #   2. Sets WREN_HOME=/project/.wren for persistent configs.
 #   3. Auto-generates connection profile from environment variables.
 #   4. Checks for wren_project.yml; if missing, runs 'wren context init'.
-#   5. Runs automated Claude CLI with --output-format stream-json and offline-wren-generate-mdl skill.
+#   5. Runs automated Claude CLI as non-root user with --output-format stream-json and offline-wren-generate-mdl skill.
 #   6. Builds MDL and indexes memory automatically.
 #
 
@@ -97,17 +97,35 @@ if [ -d "/app/sdk/wren-langchain/examples/.claude/skills" ]; then
     cp -r /app/sdk/wren-langchain/examples/.claude/skills/* "${PROJECT_DIR}/.claude/skills/" 2>/dev/null || true
 fi
 
-# Execute automated Claude CLI onboarding with --output-format stream-json
+# Execute automated Claude CLI onboarding as non-root user (to satisfy --dangerously-skip-permissions)
 target_db="${DB_NAME:-prod-db}"
 target_ds="${DATASOURCE:-mysql}"
+anthropic_url="${ANTHROPIC_BASE_URL:-http://192.168.110.209:8200/v1}"
+anthropic_key="${ANTHROPIC_API_KEY:-sk-dummy}"
+anthropic_model="${ANTHROPIC_MODEL:-Qwen3.6-27B-AEON-Ultimate-Uncensored-BF16}"
 
 if command -v claude >/dev/null 2>&1; then
     info "Launching automated Claude CLI with offline-wren-generate-mdl skill (stream-json mode)..."
     info "Target Database: ${target_db} (${target_ds})"
-    cd "$PROJECT_DIR"
-    claude --dangerously-skip-permissions --output-format stream-json -p "当前目录为MDL数据源所在目录，使用offline-wren-generate-mdl 技能探索${target_db}数据库，并为所有表生成MDL,数据库为${target_ds}" 2>&1 | while IFS= read -r line; do
-        info "  claude: $line"
-    done
+    
+    # Ensure non-root user exists for running claude CLI without root privilege restrictions
+    if ! id -u wrenuser >/dev/null 2>&1; then
+        useradd -m -u 1000 -s /bin/bash wrenuser 2>/dev/null || true
+    fi
+
+    if [ "$(id -u)" -eq 0 ]; then
+        chown -R wrenuser:wrenuser "$PROJECT_DIR" /app 2>/dev/null || true
+        su -s /bin/bash wrenuser -c "export IS_SANDBOX=1; export IS_SANDBOXED=1; export ANTHROPIC_BASE_URL=\"${anthropic_url}\"; export ANTHROPIC_API_KEY=\"${anthropic_key}\"; export ANTHROPIC_MODEL=\"${anthropic_model}\"; cd \"${PROJECT_DIR}\"; claude --dangerously-skip-permissions --output-format stream-json -p '当前目录为MDL数据源所在目录，使用offline-wren-generate-mdl 技能探索${target_db}数据库，并为所有表生成MDL,数据库为${target_ds}'" 2>&1 | while IFS= read -r line; do
+            info "  claude: $line"
+        done
+    else
+        export IS_SANDBOX=1
+        export IS_SANDBOXED=1
+        cd "$PROJECT_DIR"
+        claude --dangerously-skip-permissions --output-format stream-json -p "当前目录为MDL数据源所在目录，使用offline-wren-generate-mdl 技能探索${target_db}数据库，并为所有表生成MDL,数据库为${target_ds}" 2>&1 | while IFS= read -r line; do
+            info "  claude: $line"
+        done
+    fi
     info "Claude CLI MDL generation completed"
 else
     warn "claude CLI command not found in container — skipping automated skill execution"
