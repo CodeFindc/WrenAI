@@ -1,7 +1,10 @@
+name: wrenai-claude-init
+
 version: '3.8'
 
 services:
   wren-claude-init:
+    container_name: wren-claude-init-service
     build:
       context: ../../../
       dockerfile: sdk/wren-langchain/examples/Dockerfile.cn.claude
