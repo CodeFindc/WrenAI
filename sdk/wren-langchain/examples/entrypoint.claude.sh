@@ -115,17 +115,18 @@ if command -v claude >/dev/null 2>&1; then
 
     if [ "$(id -u)" -eq 0 ]; then
         chown -R wrenuser:wrenuser "$PROJECT_DIR" /app 2>/dev/null || true
-        su -s /bin/bash wrenuser -c "export IS_SANDBOX=1; export IS_SANDBOXED=1; export ANTHROPIC_BASE_URL=\"${anthropic_url}\"; export ANTHROPIC_API_KEY=\"${anthropic_key}\"; export ANTHROPIC_MODEL=\"${anthropic_model}\"; cd \"${PROJECT_DIR}\"; claude --dangerously-skip-permissions --output-format stream-json -p '当前目录为MDL数据源所在目录，使用offline-wren-generate-mdl 技能探索${target_db}数据库，并为所有表生成MDL,数据库为${target_ds}'" 2>&1 | while IFS= read -r line; do
+        su -s /bin/bash wrenuser -c "export IS_SANDBOX=1; export IS_SANDBOXED=1; export ANTHROPIC_BASE_URL=\"${anthropic_url}\"; export ANTHROPIC_API_KEY=\"${anthropic_key}\"; export ANTHROPIC_MODEL=\"${anthropic_model}\"; cd \"${PROJECT_DIR}\"; claude --dangerously-skip-permissions --verbose --output-format stream-json -p '当前目录为MDL数据源所在目录，使用offline-wren-generate-mdl 技能探索${target_db}数据库，并为所有表生成MDL,数据库为${target_ds}'" 2>&1 | while IFS= read -r line; do
             info "  claude: $line"
         done
     else
         export IS_SANDBOX=1
         export IS_SANDBOXED=1
         cd "$PROJECT_DIR"
-        claude --dangerously-skip-permissions --output-format stream-json -p "当前目录为MDL数据源所在目录，使用offline-wren-generate-mdl 技能探索${target_db}数据库，并为所有表生成MDL,数据库为${target_ds}" 2>&1 | while IFS= read -r line; do
+        claude --dangerously-skip-permissions --verbose --output-format stream-json -p "当前目录为MDL数据源所在目录，使用offline-wren-generate-mdl 技能探索${target_db}数据库，并为所有表生成MDL,数据库为${target_ds}" 2>&1 | while IFS= read -r line; do
             info "  claude: $line"
         done
     fi
+
     info "Claude CLI MDL generation completed"
 else
     warn "claude CLI command not found in container — skipping automated skill execution"
