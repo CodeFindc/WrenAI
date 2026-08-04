@@ -136,18 +136,26 @@ if command -v claude >/dev/null 2>&1; then
 
     env_exports="export IS_SANDBOX=1; export IS_SANDBOXED=1; export ANTHROPIC_AUTH_TOKEN=\"${anthropic_auth}\"; export ANTHROPIC_API_KEY=\"${anthropic_auth}\"; export ANTHROPIC_BASE_URL=\"${proxy_url}\"; export ANTHROPIC_MODEL=\"${anthropic_model}\"; export ANTHROPIC_DEFAULT_SONNET_MODEL=\"${sonnet_model}\"; export ANTHROPIC_DEFAULT_HAIKU_MODEL=\"${haiku_model}\"; export ANTHROPIC_DEFAULT_OPUS_MODEL=\"${opus_model}\"; export CLAUDE_CODE_SUBAGENT_MODEL=\"${subagent_model}\"; export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=\"${agent_teams}\";"
 
+    db_host="${DB_HOST:-127.0.0.1}"
+    db_port="${DB_PORT:-3306}"
+    db_user="${DB_USER:-root}"
+    active_prof="${ACTIVE_PROFILE:-default}"
+
+    claude_prompt="当前目录为 MDL 数据源所在目录。系统已自动在 .wren/profiles.yml 中配置好 profile '${active_prof}'（数据库名: ${target_db}, 类型: ${target_ds}, Host: ${db_host}:${db_port}, User: ${db_user}）。若当前目录已存在 wren_project.yml，请直接采用 Reset（重置覆盖）模式全自动处理；请立即使用 offline-wren-generate-mdl 技能探索 ${target_db} 数据库，自动完成 Schema 探查、数据类型解析规范化（使用 wren utils parse-type）、为所有表生成 MDL 模型文件并写入 models/，生成 relationships.yml，最后运行 wren context validate 与 wren context build。全程无需向用户提问交互，自动完成所有步骤。"
+
     if [ "$(id -u)" -eq 0 ]; then
         chown -R wrenuser:wrenuser "$PROJECT_DIR" /app 2>/dev/null || true
-        su -s /bin/bash wrenuser -c "${env_exports} cd \"${PROJECT_DIR}\"; claude --dangerously-skip-permissions --verbose --output-format stream-json -p '当前目录为MDL数据源所在目录，使用offline-wren-generate-mdl 技能探索${target_db}数据库，并为所有表生成MDL,数据库为${target_ds}'" 2>&1 | while IFS= read -r line; do
+        su -s /bin/bash wrenuser -c "${env_exports} cd \"${PROJECT_DIR}\"; claude --dangerously-skip-permissions --verbose --output-format stream-json -p \"${claude_prompt}\"" 2>&1 | while IFS= read -r line; do
             info "  claude: $line"
         done
     else
         eval "$env_exports"
         cd "$PROJECT_DIR"
-        claude --dangerously-skip-permissions --verbose --output-format stream-json -p "当前目录为MDL数据源所在目录，使用offline-wren-generate-mdl 技能探索${target_db}数据库，并为所有表生成MDL,数据库为${target_ds}" 2>&1 | while IFS= read -r line; do
+        claude --dangerously-skip-permissions --verbose --output-format stream-json -p "${claude_prompt}" 2>&1 | while IFS= read -r line; do
             info "  claude: $line"
         done
     fi
+
 
     if [ -n "${PROXY_PID:-}" ]; then
         kill "$PROXY_PID" 2>/dev/null || true
