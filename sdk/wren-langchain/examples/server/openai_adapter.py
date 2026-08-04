@@ -35,6 +35,8 @@ class OpenAIChatCompletionRequest(BaseModel):
     top_p: float | None = 1.0
     n: int | None = 1
     max_tokens: int | None = None
+    user: str | None = None
+
 
 
 def get_exposed_openai_models() -> list[str]:

@@ -602,7 +602,21 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
                 logger_api.error(f"request_fail route=/v1/chat/completions duration_ms={duration_ms} error={err_msg}")
             else:
                 logger_api.error(f"request_fail route=/v1/chat/completions duration_ms={duration_ms} error={err_msg}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"LLM execution error: {err_msg}")
+            
+            fallback_text = f"[系统提示]: 处理您的问答时遇到上游服务异常 ({err_msg})。会话历史已为您完好保留，请尝试重新发送或继续问答。"
+            return {
+                "id": completion_id,
+                "object": "chat.completion",
+                "created": created_ts,
+                "model": request.model,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": fallback_text}, "finish_reason": "stop"}],
+                "usage": {
+                    "prompt_tokens": sum(len(str(m.content)) for m in input_messages) // 4,
+                    "completion_tokens": len(fallback_text) // 4,
+                    "total_tokens": (sum(len(str(m.content)) for m in input_messages) + len(fallback_text)) // 4,
+                },
+            }
+
 
 
     async def event_stream_generator():
@@ -664,13 +678,13 @@ async def openai_chat_completions(request: OpenAIChatCompletionRequest):
                     yield make_sse_keepalive_chunk(completion_id, request.model, created_ts, keepalive_style)
                     continue
 
-                if item_type == "end":
-                    break
                 elif item_type == "error":
                     stream_outcome = "error"
                     logger_sse.error(f"stream_error Exception during stream: {item_data}")
-                    yield make_chat_chunk(completion_id, request.model, created_ts, {"content": f"\n[执行异常: {item_data}]"})
+                    yield make_chat_chunk(completion_id, request.model, created_ts, {"content": f"\n\n[系统提示]: 处理问答时遇到执行异常 ({item_data})。会话历史已为您完好保留，请继续发送消息。"})
+                    yielded_any_content = True
                     break
+
                 elif item_type == "progress":
                     trace_str = format_process_progress(item_data)
                     for chk in emit_process_trace(trace_str):

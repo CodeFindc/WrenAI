@@ -55,3 +55,19 @@ def test_docs_page(fastapi_client):
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     assert "Swagger UI" in response.text
+
+
+def test_openai_chat_completions_user_field(fastapi_client):
+    """Test POST /v1/chat/completions with user session ID field."""
+    payload = {
+        "model": "wren-agent",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "user": "session-123456",
+        "stream": False
+    }
+    response = fastapi_client.post("/v1/chat/completions", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["object"] == "chat.completion"
+    assert len(data["choices"]) > 0
+
